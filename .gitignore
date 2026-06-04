@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+*.egg-info/
+
+# Environment
+.env
+backend/.env
+
+# Airflow
+logs/
+plugins/
+
+# Docker
+postgres_data/
+
+# OS
+.DS_Store
