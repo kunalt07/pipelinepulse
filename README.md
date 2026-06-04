@@ -22,24 +22,24 @@ AI-powered Airflow pipeline monitoring dashboard for data engineers and business
 
 ## Project Structure
 
+```
 pipelinepulse/
+├── docker-compose.yml          # Airflow + PostgreSQL setup
 ├── dags/
-│   ├── dag_sales_pipeline.py      # Stable ETL pipeline simulation
-│   ├── dag_customer_etl.py        # Random failure simulation
-│   ├── dag_inventory_sync.py      # SLA breach simulation
-│   └── dag_reporting.py           # Upstream dependency failure simulation
+│   ├── dag_sales_pipeline.py   # Stable ETL pipeline
+│   ├── dag_customer_etl.py     # Random failure simulation
+│   ├── dag_inventory_sync.py   # SLA breach simulation
+│   └── dag_reporting.py        # Upstream failure simulation
 ├── backend/
-│   ├── main.py                    # FastAPI app, API endpoints, Gemini integration
-│   ├── scheduler.py               # Background scheduler, Airflow polling every 2 min
-│   ├── airflow_client.py          # Airflow REST API client
-│   ├── database.py                # PostgreSQL connection, SQLAlchemy setup
-│   ├── models.py                  # DAGRun, TaskInstance, AIInsight models
-│   └── requirements.txt           # Python dependencies
-├── dashboard/
-│   └── app.py                     # Streamlit dashboard, engineer + stakeholder views
-├── docker-compose.yml             # Airflow webserver, scheduler, PostgreSQL
-├── .gitignore
-└── README.md
+│   ├── main.py                 # FastAPI app + Gemini integration
+│   ├── scheduler.py            # Airflow polling every 2 minutes
+│   ├── airflow_client.py       # Airflow REST API client
+│   ├── database.py             # PostgreSQL + SQLAlchemy setup
+│   ├── models.py               # DAGRun, TaskInstance, AIInsight
+│   └── requirements.txt        # Python dependencies
+└── dashboard/
+    └── app.py                  # Streamlit dashboard
+```
 
 ## Setup
 
