@@ -40,6 +40,55 @@ export type StuckRun = {
   threshold_seconds: number;
 };
 
+export type AnalyticsResponse = {
+  range: "7d" | "30d";
+  totals: {
+    current: {
+      total: number;
+      failed: number;
+      success_rate: number;
+      total_runtime_seconds: number;
+      avg_duration_seconds: number;
+    };
+    previous: {
+      total: number;
+      failed: number;
+      success_rate: number;
+      total_runtime_seconds: number;
+      avg_duration_seconds: number;
+    };
+    deltas: {
+      total: number | null;
+      failed: number | null;
+      success_rate: number;
+      total_runtime_seconds: number | null;
+      avg_duration_seconds: number | null;
+    };
+  };
+  daily: Array<{
+    date: string;
+    total: number;
+    failed: number;
+    success: number;
+    failure_rate: number;
+  }>;
+  slowest_dags: Array<{
+    dag_id: string;
+    total_runs: number;
+    failures: number;
+    failure_rate: number;
+    avg_duration_seconds: number;
+  }>;
+  most_failures: Array<{
+    dag_id: string;
+    total_runs: number;
+    failures: number;
+    failure_rate: number;
+    avg_duration_seconds: number;
+  }>;
+  busy_hours: Array<{ hour: number; total: number; failed: number }>;
+};
+
 export type AlertConfig = {
   dag_id: string;
   muted: boolean;
@@ -118,6 +167,8 @@ export const api = {
     ),
   runDiff: (dagId: string, runId: string) =>
     jsonFetch<RunDiff>(`/runs/${dagId}/${encodeURIComponent(runId)}/diff`),
+  analytics: (range: "7d" | "30d" = "7d") =>
+    jsonFetch<AnalyticsResponse>(`/analytics?range=${range}`),
   alertConfigs: () =>
     jsonFetch<{ configs: AlertConfig[] }>("/alerts/config").then((r) => r.configs),
   updateAlertConfig: (dagId: string, body: Omit<AlertConfig, "dag_id">) =>

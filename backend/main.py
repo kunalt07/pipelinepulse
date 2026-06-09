@@ -89,6 +89,7 @@ def list_dags(_: str = Depends(require_auth)):
     return {"dags": _get_dags()}
 
 RANGE_HOURS = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
+ANALYTICS_RANGES = {"7d": 24 * 7, "30d": 24 * 30}
 
 
 @app.get("/runs/{dag_id}")
@@ -428,6 +429,132 @@ def stuck_runs(db: Session = Depends(get_db), _: str = Depends(require_auth)):
 
     stuck.sort(key=lambda s: s["elapsed_seconds"] / s["threshold_seconds"], reverse=True)
     return {"stuck": stuck}
+
+
+def _pct_delta(current: float, previous: float) -> Optional[float]:
+    if previous <= 0:
+        return None
+    return round(((current - previous) / previous) * 100, 1)
+
+
+@app.get("/analytics")
+def analytics(
+    range: str = "7d",
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    if range not in ANALYTICS_RANGES:
+        raise HTTPException(status_code=400, detail="range must be 7d or 30d")
+    hours = ANALYTICS_RANGES[range]
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    cutoff = now - timedelta(hours=hours)
+    prior_cutoff = now - timedelta(hours=hours * 2)
+
+    def window(start, end):
+        return db.query(DAGRun).filter(
+            DAGRun.start_date.isnot(None),
+            DAGRun.start_date >= start,
+            DAGRun.start_date < end,
+        ).all()
+
+    current_runs = window(cutoff, now)
+    prior_runs = window(prior_cutoff, cutoff)
+
+    def stats(runs):
+        total = len(runs)
+        failed = sum(1 for r in runs if r.state == "failed")
+        success = sum(1 for r in runs if r.state == "success")
+        durations = [r.duration_seconds for r in runs if r.duration_seconds]
+        return {
+            "total": total,
+            "failed": failed,
+            "success_rate": round((success / total * 100), 1) if total else 0.0,
+            "total_runtime_seconds": round(sum(durations), 1) if durations else 0.0,
+            "avg_duration_seconds": round(sum(durations) / len(durations), 1) if durations else 0.0,
+        }
+
+    cur = stats(current_runs)
+    prev = stats(prior_runs)
+
+    # Daily series (failure rate per day)
+    by_day: dict[str, dict[str, int]] = {}
+    for r in current_runs:
+        if not r.start_date:
+            continue
+        day = r.start_date.strftime("%Y-%m-%d")
+        bucket = by_day.setdefault(day, {"total": 0, "failed": 0, "success": 0})
+        bucket["total"] += 1
+        if r.state == "failed":
+            bucket["failed"] += 1
+        elif r.state == "success":
+            bucket["success"] += 1
+    daily = [
+        {
+            "date": day,
+            "total": v["total"],
+            "failed": v["failed"],
+            "success": v["success"],
+            "failure_rate": round((v["failed"] / v["total"]) * 100, 1) if v["total"] else 0.0,
+        }
+        for day, v in sorted(by_day.items())
+    ]
+
+    # Per-DAG aggregates: slowest avg duration, highest failure rate
+    by_dag: dict[str, dict[str, float]] = {}
+    for r in current_runs:
+        d = by_dag.setdefault(r.dag_id, {"total": 0, "failed": 0, "duration_total": 0.0, "duration_count": 0})
+        d["total"] += 1
+        if r.state == "failed":
+            d["failed"] += 1
+        if r.duration_seconds:
+            d["duration_total"] += r.duration_seconds
+            d["duration_count"] += 1
+    per_dag = []
+    for dag_id, d in by_dag.items():
+        avg = d["duration_total"] / d["duration_count"] if d["duration_count"] else 0.0
+        fr = (d["failed"] / d["total"]) * 100 if d["total"] else 0.0
+        per_dag.append({
+            "dag_id": dag_id,
+            "total_runs": int(d["total"]),
+            "failures": int(d["failed"]),
+            "failure_rate": round(fr, 1),
+            "avg_duration_seconds": round(avg, 1),
+        })
+    slowest = sorted(per_dag, key=lambda x: x["avg_duration_seconds"], reverse=True)[:5]
+    most_failures = sorted(per_dag, key=lambda x: (x["failure_rate"], x["failures"]), reverse=True)[:5]
+
+    # Busy hours: counts by hour-of-day across the window
+    by_hour = [{"hour": h, "total": 0, "failed": 0} for h in range_iter()]
+    for r in current_runs:
+        if not r.start_date:
+            continue
+        h = r.start_date.hour
+        by_hour[h]["total"] += 1
+        if r.state == "failed":
+            by_hour[h]["failed"] += 1
+
+    return {
+        "range": range,
+        "totals": {
+            "current": cur,
+            "previous": prev,
+            "deltas": {
+                "total": _pct_delta(cur["total"], prev["total"]),
+                "failed": _pct_delta(cur["failed"], prev["failed"]),
+                "success_rate": round(cur["success_rate"] - prev["success_rate"], 1),
+                "total_runtime_seconds": _pct_delta(cur["total_runtime_seconds"], prev["total_runtime_seconds"]),
+                "avg_duration_seconds": _pct_delta(cur["avg_duration_seconds"], prev["avg_duration_seconds"]),
+            },
+        },
+        "daily": daily,
+        "slowest_dags": slowest,
+        "most_failures": most_failures,
+        "busy_hours": by_hour,
+    }
+
+
+def range_iter():
+    return list(range(24))
 
 
 @app.get("/summary")

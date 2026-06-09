@@ -5,7 +5,8 @@ import { motion } from "framer-motion";
 import { Inbox, Play, RefreshCw } from "lucide-react";
 import { api, type DAG, type DAGRun, type StuckRun, type Summary } from "@/lib/api";
 import { formatDuration, formatRelativeTime } from "@/lib/utils";
-import { Sidebar } from "@/components/sidebar";
+import { Sidebar, type View } from "@/components/sidebar";
+import { AnalyticsView } from "@/components/analytics-view";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Metric } from "@/components/metric";
@@ -39,6 +40,7 @@ export function Dashboard() {
   const [page, setPage] = useState(0);
   const [triggering, setTriggering] = useState(false);
   const [triggerMsg, setTriggerMsg] = useState<string | null>(null);
+  const [view, setView] = useState<View>("dashboard");
 
   const PAGE_SIZE = 10;
 
@@ -159,9 +161,21 @@ export function Dashboard() {
 
   return (
     <div className="flex h-screen overflow-hidden">
-      <Sidebar dags={dags} selected={selected} onSelect={setSelected} />
+      <Sidebar
+        dags={dags}
+        selected={selected}
+        onSelect={(d) => {
+          setSelected(d);
+          setView("dashboard");
+        }}
+        view={view}
+        onChangeView={setView}
+      />
 
       <main className="flex-1 overflow-y-auto scrollbar-thin">
+        {view === "analytics" && <AnalyticsView />}
+        {view === "dashboard" && (
+        <>
         <header className="sticky top-0 z-10 flex h-14 items-center justify-between border-b bg-background/80 px-6 backdrop-blur">
           <div className="flex items-center gap-3">
             <span className="text-xs font-medium text-muted-foreground">Dashboard</span>
@@ -473,6 +487,8 @@ export function Dashboard() {
             </>
           )}
         </div>
+        </>
+        )}
       </main>
     </div>
   );
