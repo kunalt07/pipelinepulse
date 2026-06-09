@@ -11,7 +11,7 @@ from database import get_db, engine, run_migrations
 from models import Base, DAGRun, TaskInstance, AIInsight, Notification
 from notifier import send_failure_alert, webhook_url
 from scheduler import start_scheduler, resync_run
-from airflow_client import get_task_logs
+from airflow_client import get_task_logs, trigger_dag_run
 import google.generativeai as genai
 from dotenv import load_dotenv
 
@@ -184,6 +184,19 @@ def test_notification(db: Session = Depends(get_db), _: str = Depends(require_au
 @app.post("/runs/{dag_id}/{run_id}/resync")
 def resync(dag_id: str, run_id: str, _: str = Depends(require_auth)):
     return resync_run(dag_id, run_id)
+
+
+@app.post("/dags/{dag_id}/trigger")
+def trigger_run(dag_id: str, _: str = Depends(require_auth)):
+    try:
+        result = trigger_dag_run(dag_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Airflow rejected trigger: {e}")
+    return {
+        "triggered": True,
+        "run_id": result.get("dag_run_id"),
+        "state": result.get("state"),
+    }
 
 
 @app.get("/tasks/{dag_id}/{run_id}/{task_id}/logs")

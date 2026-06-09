@@ -41,3 +41,14 @@ def get_task_logs(dag_id, run_id, task_id, attempt=1):
     if r.status_code == 200:
         return r.text
     return ""
+
+
+def trigger_dag_run(dag_id):
+    """POST a new dag run; Airflow generates the run_id."""
+    r = requests.post(
+        f"{BASE_URL}/api/v1/dags/{dag_id}/dagRuns",
+        auth=AUTH,
+        json={"conf": {}},
+    )
+    r.raise_for_status()
+    return r.json()

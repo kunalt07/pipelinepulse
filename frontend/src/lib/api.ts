@@ -85,6 +85,11 @@ export const api = {
       `/runs/${dagId}/${encodeURIComponent(runId)}/resync`,
       { method: "POST" },
     ),
+  triggerRun: (dagId: string) =>
+    jsonFetch<{ triggered: boolean; run_id?: string; state?: string }>(
+      `/dags/${dagId}/trigger`,
+      { method: "POST" },
+    ),
   explain: (dagId: string, runId: string) =>
     jsonFetch<{ insight: string }>(
       `/ai/explain/${dagId}/${encodeURIComponent(runId)}`,

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { Play, RefreshCw } from "lucide-react";
 import { api, type DAG, type DAGRun, type StuckRun, type Summary } from "@/lib/api";
 import { formatDuration, formatRelativeTime } from "@/lib/utils";
 import { Sidebar } from "@/components/sidebar";
@@ -26,6 +26,8 @@ export function Dashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [range, setRange] = useState<"24h" | "7d" | "30d" | "all">("all");
   const [page, setPage] = useState(0);
+  const [triggering, setTriggering] = useState(false);
+  const [triggerMsg, setTriggerMsg] = useState<string | null>(null);
 
   const PAGE_SIZE = 10;
 
@@ -73,6 +75,22 @@ export function Dashboard() {
     setRefreshing(false);
   };
 
+  const triggerRun = async () => {
+    if (!selected) return;
+    setTriggering(true);
+    setTriggerMsg(null);
+    try {
+      const res = await api.triggerRun(selected);
+      setTriggerMsg(`Triggered · ${res.state ?? "queued"}`);
+      setTimeout(() => setTriggerMsg(null), 4000);
+    } catch (e) {
+      setTriggerMsg(e instanceof Error ? e.message : "Trigger failed");
+      setTimeout(() => setTriggerMsg(null), 6000);
+    } finally {
+      setTriggering(false);
+    }
+  };
+
   const dagFailed = runs.filter((r) => r.state === "failed").length;
   const dagSuccessRate =
     runs.length > 0 ? Math.round(((runs.length - dagFailed) / runs.length) * 1000) / 10 : 0;
@@ -115,10 +133,24 @@ export function Dashboard() {
                 : "No runs"}
             </p>
           </div>
-          <Button variant="outline" size="sm" onClick={refresh} disabled={refreshing}>
-            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
-            Refresh
-          </Button>
+          <div className="flex items-center gap-2">
+            {triggerMsg && (
+              <span className="text-[11px] text-muted-foreground">{triggerMsg}</span>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={triggerRun}
+              disabled={!selected || triggering}
+            >
+              <Play className={`h-3.5 w-3.5 ${triggering ? "animate-pulse" : ""}`} />
+              Trigger run
+            </Button>
+            <Button variant="outline" size="sm" onClick={refresh} disabled={refreshing}>
+              <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+          </div>
         </header>
 
         <div className="space-y-6 p-6">
