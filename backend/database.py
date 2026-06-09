@@ -11,9 +11,25 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
+def run_migrations():
+    """Lightweight idempotent column-adds. Saves us from pulling in alembic."""
+    from sqlalchemy import text
+
+    statements = [
+        "ALTER TABLE task_instances ADD COLUMN IF NOT EXISTS try_number INTEGER",
+    ]
+    with engine.begin() as conn:
+        for stmt in statements:
+            try:
+                conn.execute(text(stmt))
+            except Exception:
+                pass

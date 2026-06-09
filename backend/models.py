@@ -27,6 +27,7 @@ class TaskInstance(Base):
     start_date = Column(DateTime, nullable=True)
     end_date = Column(DateTime, nullable=True)
     duration_seconds = Column(Float, nullable=True)
+    try_number = Column(Integer, nullable=True)
     error_message = Column(Text, nullable=True)
     synced_at = Column(DateTime, default=datetime.utcnow)
 
@@ -40,3 +41,16 @@ class AIInsight(Base):
     insight_type = Column(String)
     content = Column(Text)
     synced_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    __table_args__ = {'extend_existing': True}
+
+    id = Column(Integer, primary_key=True, index=True)
+    dag_id = Column(String, index=True)
+    run_id = Column(String, index=True)
+    event = Column(String)            # e.g. "run_failed"
+    delivered = Column(String)        # "ok" | "skipped" | "error: <reason>"
+    webhook_url = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)

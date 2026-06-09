@@ -5,9 +5,15 @@ __pycache__/
 venv/
 *.egg-info/
 
-# Environment
+# Environment — never commit secret-bearing files
 .env
-backend/.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+**/.env.*.local
+!.env.example
+!**/.env.example
 
 # Airflow
 logs/
