@@ -1,17 +1,71 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
 from database import SessionLocal
-from models import DAGRun, TaskInstance, Notification
+from models import DAGRun, TaskInstance, Notification, DagAlertConfig
 from airflow_client import get_dags, get_dag_runs, get_task_instances, get_task_logs
 from notifier import send_failure_alert, webhook_url
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 import logging
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def _parse_hhmm(value):
+    if not value:
+        return None
+    try:
+        h, m = value.split(":")
+        return time(int(h), int(m))
+    except Exception:
+        return None
+
+
+def _in_quiet_hours(cfg: DagAlertConfig) -> bool:
+    """True if the current time falls inside the configured quiet window."""
+    start = _parse_hhmm(cfg.quiet_hours_start)
+    end = _parse_hhmm(cfg.quiet_hours_end)
+    if start is None or end is None or start == end:
+        return False
+
+    tz = None
+    if cfg.quiet_timezone and ZoneInfo:
+        try:
+            tz = ZoneInfo(cfg.quiet_timezone)
+        except Exception:
+            tz = None
+    now = datetime.now(tz).time() if tz else datetime.now().time()
+
+    if start < end:
+        return start <= now < end
+    # wrap-around window (e.g. 22:00 → 06:00)
+    return now >= start or now < end
+
+
+def _consecutive_failure_count(db: Session, dag_id: str) -> int:
+    """How many of the most recent runs failed in a row, ending with the most recent."""
+    recent = (
+        db.query(DAGRun)
+        .filter(DAGRun.dag_id == dag_id, DAGRun.state.in_(("success", "failed")))
+        .order_by(DAGRun.start_date.desc().nullslast())
+        .limit(20)
+        .all()
+    )
+    count = 0
+    for r in recent:
+        if r.state == "failed":
+            count += 1
+        else:
+            break
+    return count
+
+
 def _maybe_alert(db, dag_id: str, run_id: str):
-    """Fire a webhook alert for a newly-failed run, exactly once per run."""
+    """Fire a webhook alert for a newly-failed run, exactly once per run, honoring per-DAG config."""
     already = db.query(Notification).filter(
         Notification.dag_id == dag_id,
         Notification.run_id == run_id,
@@ -19,6 +73,26 @@ def _maybe_alert(db, dag_id: str, run_id: str):
         Notification.delivered == "ok",
     ).first()
     if already:
+        return
+
+    cfg = db.query(DagAlertConfig).filter(DagAlertConfig.dag_id == dag_id).first()
+    suppressed_reason = None
+    if cfg is not None:
+        if cfg.muted:
+            suppressed_reason = "muted"
+        elif cfg.min_consecutive_failures and cfg.min_consecutive_failures > 1:
+            streak = _consecutive_failure_count(db, dag_id)
+            if streak < cfg.min_consecutive_failures:
+                suppressed_reason = f"below_threshold({streak}/{cfg.min_consecutive_failures})"
+        if suppressed_reason is None and _in_quiet_hours(cfg):
+            suppressed_reason = "quiet_hours"
+
+    if suppressed_reason:
+        db.add(Notification(
+            dag_id=dag_id, run_id=run_id, event="run_failed",
+            delivered=f"suppressed:{suppressed_reason}", webhook_url=webhook_url() or "",
+        ))
+        logger.info(f"Alert suppressed for {dag_id}/{run_id}: {suppressed_reason}")
         return
 
     failed_task = db.query(TaskInstance).filter(

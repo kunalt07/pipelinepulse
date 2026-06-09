@@ -40,6 +40,15 @@ export type StuckRun = {
   threshold_seconds: number;
 };
 
+export type AlertConfig = {
+  dag_id: string;
+  muted: boolean;
+  min_consecutive_failures: number;
+  quiet_hours_start: string | null;
+  quiet_hours_end: string | null;
+  quiet_timezone: string | null;
+};
+
 export type RunDiff = {
   baseline: { run_id: string; start_date: string; duration_seconds: number | null } | null;
   current?: { run_id: string; state: string; duration_seconds: number | null };
@@ -109,6 +118,14 @@ export const api = {
     ),
   runDiff: (dagId: string, runId: string) =>
     jsonFetch<RunDiff>(`/runs/${dagId}/${encodeURIComponent(runId)}/diff`),
+  alertConfigs: () =>
+    jsonFetch<{ configs: AlertConfig[] }>("/alerts/config").then((r) => r.configs),
+  updateAlertConfig: (dagId: string, body: Omit<AlertConfig, "dag_id">) =>
+    jsonFetch<AlertConfig>(`/alerts/config/${dagId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   explain: (dagId: string, runId: string) =>
     jsonFetch<{ insight: string }>(
       `/ai/explain/${dagId}/${encodeURIComponent(runId)}`,

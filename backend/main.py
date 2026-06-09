@@ -6,9 +6,10 @@ from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from database import get_db, engine, run_migrations
-from models import Base, DAGRun, TaskInstance, AIInsight, Notification
+from models import Base, DAGRun, TaskInstance, AIInsight, Notification, DagAlertConfig
 from notifier import send_failure_alert, webhook_url
 from scheduler import start_scheduler, resync_run
 from airflow_client import get_task_logs, trigger_dag_run
@@ -179,6 +180,81 @@ def test_notification(db: Session = Depends(get_db), _: str = Depends(require_au
     ))
     db.commit()
     return {"delivered": delivered}
+
+
+class AlertConfigUpdate(BaseModel):
+    muted: bool = False
+    min_consecutive_failures: int = Field(default=1, ge=1, le=20)
+    quiet_hours_start: Optional[str] = None
+    quiet_hours_end: Optional[str] = None
+    quiet_timezone: Optional[str] = None
+
+
+def _serialize_config(cfg: Optional[DagAlertConfig], dag_id: str) -> dict:
+    if cfg is None:
+        return {
+            "dag_id": dag_id,
+            "muted": False,
+            "min_consecutive_failures": 1,
+            "quiet_hours_start": None,
+            "quiet_hours_end": None,
+            "quiet_timezone": None,
+        }
+    return {
+        "dag_id": cfg.dag_id,
+        "muted": cfg.muted,
+        "min_consecutive_failures": cfg.min_consecutive_failures,
+        "quiet_hours_start": cfg.quiet_hours_start,
+        "quiet_hours_end": cfg.quiet_hours_end,
+        "quiet_timezone": cfg.quiet_timezone,
+    }
+
+
+@app.get("/alerts/config")
+def list_alert_configs(db: Session = Depends(get_db), _: str = Depends(require_auth)):
+    """Return alert configs for every known DAG; missing rows yield defaults."""
+    from airflow_client import get_dags as _get_dags
+    try:
+        dag_ids = [d["dag_id"] for d in _get_dags()]
+    except Exception:
+        dag_ids = []
+    existing = {c.dag_id: c for c in db.query(DagAlertConfig).all()}
+    for dag_id in existing.keys():
+        if dag_id not in dag_ids:
+            dag_ids.append(dag_id)
+    return {"configs": [_serialize_config(existing.get(d), d) for d in sorted(dag_ids)]}
+
+
+@app.put("/alerts/config/{dag_id}")
+def upsert_alert_config(
+    dag_id: str,
+    body: AlertConfigUpdate,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    if body.quiet_hours_start or body.quiet_hours_end:
+        for label, val in (("start", body.quiet_hours_start), ("end", body.quiet_hours_end)):
+            if val is None:
+                continue
+            try:
+                h, m = val.split(":")
+                if not (0 <= int(h) < 24 and 0 <= int(m) < 60):
+                    raise ValueError
+            except Exception:
+                raise HTTPException(status_code=400, detail=f"quiet_hours_{label} must be HH:MM")
+
+    cfg = db.query(DagAlertConfig).filter(DagAlertConfig.dag_id == dag_id).first()
+    if cfg is None:
+        cfg = DagAlertConfig(dag_id=dag_id)
+        db.add(cfg)
+    cfg.muted = body.muted
+    cfg.min_consecutive_failures = body.min_consecutive_failures
+    cfg.quiet_hours_start = body.quiet_hours_start or None
+    cfg.quiet_hours_end = body.quiet_hours_end or None
+    cfg.quiet_timezone = body.quiet_timezone or None
+    db.commit()
+    db.refresh(cfg)
+    return _serialize_config(cfg, dag_id)
 
 
 @app.post("/runs/{dag_id}/{run_id}/resync")
