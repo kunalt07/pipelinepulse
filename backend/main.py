@@ -186,6 +186,85 @@ def resync(dag_id: str, run_id: str, _: str = Depends(require_auth)):
     return resync_run(dag_id, run_id)
 
 
+@app.get("/runs/{dag_id}/{run_id}/diff")
+def run_diff(dag_id: str, run_id: str, db: Session = Depends(get_db), _: str = Depends(require_auth)):
+    """Compare a run's tasks against the last successful run of the same DAG."""
+    current = db.query(DAGRun).filter(DAGRun.dag_id == dag_id, DAGRun.run_id == run_id).first()
+    if not current:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    baseline_q = db.query(DAGRun).filter(
+        DAGRun.dag_id == dag_id,
+        DAGRun.state == "success",
+        DAGRun.run_id != run_id,
+    )
+    if current.start_date:
+        baseline_q = baseline_q.filter(
+            DAGRun.start_date.isnot(None),
+            DAGRun.start_date < current.start_date,
+        )
+    baseline = baseline_q.order_by(DAGRun.start_date.desc().nullslast()).first()
+    if not baseline:
+        return {"baseline": None, "task_changes": [], "added_tasks": [], "removed_tasks": [],
+                "duration_delta_seconds": None}
+
+    cur_tasks = {t.task_id: t for t in db.query(TaskInstance).filter(
+        TaskInstance.dag_id == dag_id, TaskInstance.run_id == run_id
+    ).all()}
+    base_tasks = {t.task_id: t for t in db.query(TaskInstance).filter(
+        TaskInstance.dag_id == dag_id, TaskInstance.run_id == baseline.run_id
+    ).all()}
+
+    task_changes = []
+    for task_id, cur in cur_tasks.items():
+        base = base_tasks.get(task_id)
+        if not base:
+            continue
+        state_changed = cur.state != base.state
+        duration_delta = None
+        if cur.duration_seconds is not None and base.duration_seconds is not None:
+            duration_delta = round(cur.duration_seconds - base.duration_seconds, 1)
+        if state_changed or (duration_delta is not None and abs(duration_delta) >= 1):
+            task_changes.append({
+                "task_id": task_id,
+                "current_state": cur.state,
+                "baseline_state": base.state,
+                "state_changed": state_changed,
+                "current_duration": cur.duration_seconds,
+                "baseline_duration": base.duration_seconds,
+                "duration_delta_seconds": duration_delta,
+            })
+
+    task_changes.sort(key=lambda c: (
+        not c["state_changed"],
+        -abs(c["duration_delta_seconds"] or 0),
+    ))
+
+    added = [t for t in cur_tasks.keys() if t not in base_tasks]
+    removed = [t for t in base_tasks.keys() if t not in cur_tasks]
+
+    duration_delta = None
+    if current.duration_seconds is not None and baseline.duration_seconds is not None:
+        duration_delta = round(current.duration_seconds - baseline.duration_seconds, 1)
+
+    return {
+        "baseline": {
+            "run_id": baseline.run_id,
+            "start_date": str(baseline.start_date),
+            "duration_seconds": baseline.duration_seconds,
+        },
+        "current": {
+            "run_id": current.run_id,
+            "state": current.state,
+            "duration_seconds": current.duration_seconds,
+        },
+        "duration_delta_seconds": duration_delta,
+        "task_changes": task_changes,
+        "added_tasks": added,
+        "removed_tasks": removed,
+    }
+
+
 @app.post("/dags/{dag_id}/trigger")
 def trigger_run(dag_id: str, _: str = Depends(require_auth)):
     try:

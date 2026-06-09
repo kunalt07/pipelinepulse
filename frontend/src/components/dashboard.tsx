@@ -14,6 +14,7 @@ import { AIPanel } from "@/components/ai-panel";
 import { TaskPanel } from "@/components/task-panel";
 import { NotificationsPanel } from "@/components/notifications-panel";
 import { StuckRunsBanner } from "@/components/stuck-runs-banner";
+import { DiffPanel } from "@/components/diff-panel";
 
 export function Dashboard() {
   const [dags, setDags] = useState<DAG[]>([]);
@@ -302,6 +303,21 @@ export function Dashboard() {
                       />
                     </CardContent>
                   </Card>
+
+                  {selectedRun &&
+                    runs.find((r) => r.run_id === selectedRun)?.state === "failed" && (
+                      <Card>
+                        <CardHeader>
+                          <CardTitle>What changed?</CardTitle>
+                          <p className="text-xs text-muted-foreground">
+                            Diff against last successful run
+                          </p>
+                        </CardHeader>
+                        <CardContent>
+                          <DiffPanel dagId={selected} runId={selectedRun} />
+                        </CardContent>
+                      </Card>
+                    )}
 
                   <Card>
                     <CardHeader>

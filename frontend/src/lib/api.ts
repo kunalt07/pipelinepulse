@@ -40,6 +40,23 @@ export type StuckRun = {
   threshold_seconds: number;
 };
 
+export type RunDiff = {
+  baseline: { run_id: string; start_date: string; duration_seconds: number | null } | null;
+  current?: { run_id: string; state: string; duration_seconds: number | null };
+  duration_delta_seconds: number | null;
+  task_changes: Array<{
+    task_id: string;
+    current_state: string;
+    baseline_state: string;
+    state_changed: boolean;
+    current_duration: number | null;
+    baseline_duration: number | null;
+    duration_delta_seconds: number | null;
+  }>;
+  added_tasks: string[];
+  removed_tasks: string[];
+};
+
 export type TaskInstance = {
   task_id: string;
   state: string;
@@ -90,6 +107,8 @@ export const api = {
       `/dags/${dagId}/trigger`,
       { method: "POST" },
     ),
+  runDiff: (dagId: string, runId: string) =>
+    jsonFetch<RunDiff>(`/runs/${dagId}/${encodeURIComponent(runId)}/diff`),
   explain: (dagId: string, runId: string) =>
     jsonFetch<{ insight: string }>(
       `/ai/explain/${dagId}/${encodeURIComponent(runId)}`,
