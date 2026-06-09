@@ -68,8 +68,10 @@ export const api = {
   summary: () => jsonFetch<Summary>("/summary"),
   stuckRuns: () => jsonFetch<{ stuck: StuckRun[] }>("/stuck-runs").then((r) => r.stuck),
   dags: () => jsonFetch<{ dags: DAG[] }>("/dags").then((r) => r.dags),
-  runs: (dagId: string) =>
-    jsonFetch<{ runs: DAGRun[] }>(`/runs/${dagId}`).then((r) => r.runs),
+  runs: (dagId: string, range: string = "all") =>
+    jsonFetch<{ runs: DAGRun[]; range: string; total: number }>(
+      `/runs/${dagId}?range=${encodeURIComponent(range)}`,
+    ).then((r) => r.runs),
   tasks: (dagId: string, runId: string) =>
     jsonFetch<{ tasks: TaskInstance[] }>(
       `/tasks/${dagId}/${encodeURIComponent(runId)}`,

@@ -1,6 +1,6 @@
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, status
@@ -87,10 +87,34 @@ def list_dags(_: str = Depends(require_auth)):
     from airflow_client import get_dags as _get_dags
     return {"dags": _get_dags()}
 
+RANGE_HOURS = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
+
+
 @app.get("/runs/{dag_id}")
-def dag_runs(dag_id: str, db: Session = Depends(get_db), _: str = Depends(require_auth)):
-    runs = db.query(DAGRun).filter(DAGRun.dag_id == dag_id).order_by(DAGRun.synced_at.desc()).limit(20).all()
-    return {"runs": [{"run_id": r.run_id, "state": r.state, "start_date": str(r.start_date), "duration_seconds": r.duration_seconds} for r in runs]}
+def dag_runs(
+    dag_id: str,
+    range: str = "all",
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    q = db.query(DAGRun).filter(DAGRun.dag_id == dag_id)
+    if range in RANGE_HOURS:
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=RANGE_HOURS[range])
+        q = q.filter(DAGRun.start_date.isnot(None), DAGRun.start_date >= cutoff)
+    runs = q.order_by(DAGRun.start_date.desc().nullslast()).all()
+    return {
+        "runs": [
+            {
+                "run_id": r.run_id,
+                "state": r.state,
+                "start_date": str(r.start_date),
+                "duration_seconds": r.duration_seconds,
+            }
+            for r in runs
+        ],
+        "range": range,
+        "total": len(runs),
+    }
 
 @app.get("/tasks/{dag_id}/{run_id}")
 def task_instances(dag_id: str, run_id: str, db: Session = Depends(get_db), _: str = Depends(require_auth)):

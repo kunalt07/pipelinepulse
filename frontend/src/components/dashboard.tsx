@@ -24,6 +24,10 @@ export function Dashboard() {
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [range, setRange] = useState<"24h" | "7d" | "30d" | "all">("all");
+  const [page, setPage] = useState(0);
+
+  const PAGE_SIZE = 10;
 
   const loadGlobal = async () => {
     try {
@@ -42,12 +46,13 @@ export function Dashboard() {
     }
   };
 
-  const loadRuns = async (dagId: string) => {
+  const loadRuns = async (dagId: string, r: typeof range = range) => {
     try {
-      const r = await api.runs(dagId);
-      setRuns(r);
-      const firstFailed = r.find((x) => x.state === "failed");
-      setSelectedRun(firstFailed?.run_id ?? r[0]?.run_id ?? null);
+      const fetched = await api.runs(dagId, r);
+      setRuns(fetched);
+      setPage(0);
+      const firstFailed = fetched.find((x) => x.state === "failed");
+      setSelectedRun(firstFailed?.run_id ?? fetched[0]?.run_id ?? null);
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : "Failed to load runs");
     }
@@ -58,21 +63,28 @@ export function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (selected) loadRuns(selected);
-  }, [selected]);
+    if (selected) loadRuns(selected, range);
+  }, [selected, range]);
 
   const refresh = async () => {
     setRefreshing(true);
     await loadGlobal();
-    if (selected) await loadRuns(selected);
+    if (selected) await loadRuns(selected, range);
     setRefreshing(false);
   };
 
-  const failedRuns = runs.filter((r) => r.state === "failed");
-  const recentRuns = runs.slice(0, 8);
   const dagFailed = runs.filter((r) => r.state === "failed").length;
   const dagSuccessRate =
     runs.length > 0 ? Math.round(((runs.length - dagFailed) / runs.length) * 1000) / 10 : 0;
+  const totalPages = Math.max(1, Math.ceil(runs.length / PAGE_SIZE));
+  const pagedRuns = runs.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  const RANGE_OPTIONS: { value: typeof range; label: string }[] = [
+    { value: "24h", label: "24h" },
+    { value: "7d", label: "7d" },
+    { value: "30d", label: "30d" },
+    { value: "all", label: "All" },
+  ];
 
   if (loadError && dags.length === 0) {
     return (
@@ -139,8 +151,23 @@ export function Dashboard() {
                   <div>
                     <CardTitle>Run duration</CardTitle>
                     <p className="text-xs text-muted-foreground">
-                      Last {runs.length} runs · {dagSuccessRate}% success
+                      {runs.length} runs · {dagSuccessRate}% success
                     </p>
+                  </div>
+                  <div className="flex gap-1 rounded-md border p-0.5">
+                    {RANGE_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        onClick={() => setRange(opt.value)}
+                        className={`rounded px-2.5 py-1 text-xs transition-colors ${
+                          range === opt.value
+                            ? "bg-accent text-accent-foreground"
+                            : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
                   </div>
                 </CardHeader>
                 <CardContent>
@@ -151,7 +178,7 @@ export function Dashboard() {
               <div className="grid gap-6 lg:grid-cols-3">
                 <Card className="lg:col-span-2">
                   <CardHeader>
-                    <CardTitle>Recent runs</CardTitle>
+                    <CardTitle>Runs</CardTitle>
                   </CardHeader>
                   <CardContent className="p-0">
                     <table className="w-full text-sm">
@@ -164,7 +191,7 @@ export function Dashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {recentRuns.map((r) => (
+                        {pagedRuns.map((r) => (
                           <tr
                             key={r.run_id}
                             onClick={() => setSelectedRun(r.run_id)}
@@ -186,15 +213,41 @@ export function Dashboard() {
                             </td>
                           </tr>
                         ))}
-                        {recentRuns.length === 0 && (
+                        {pagedRuns.length === 0 && (
                           <tr>
                             <td colSpan={4} className="px-5 py-8 text-center text-muted-foreground">
-                              No runs yet
+                              No runs in this range
                             </td>
                           </tr>
                         )}
                       </tbody>
                     </table>
+                    {runs.length > PAGE_SIZE && (
+                      <div className="flex items-center justify-between border-t px-5 py-2 text-xs text-muted-foreground">
+                        <span>
+                          {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, runs.length)} of{" "}
+                          {runs.length}
+                        </span>
+                        <div className="flex gap-1">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setPage((p) => Math.max(0, p - 1))}
+                            disabled={page === 0}
+                          >
+                            Prev
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                            disabled={page >= totalPages - 1}
+                          >
+                            Next
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
 
