@@ -31,6 +31,15 @@ export type Summary = {
   success_rate: number;
 };
 
+export type StuckRun = {
+  dag_id: string;
+  run_id: string;
+  start_date: string;
+  elapsed_seconds: number;
+  p95_seconds: number;
+  threshold_seconds: number;
+};
+
 export type TaskInstance = {
   task_id: string;
   state: string;
@@ -57,6 +66,7 @@ async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   summary: () => jsonFetch<Summary>("/summary"),
+  stuckRuns: () => jsonFetch<{ stuck: StuckRun[] }>("/stuck-runs").then((r) => r.stuck),
   dags: () => jsonFetch<{ dags: DAG[] }>("/dags").then((r) => r.dags),
   runs: (dagId: string) =>
     jsonFetch<{ runs: DAGRun[] }>(`/runs/${dagId}`).then((r) => r.runs),

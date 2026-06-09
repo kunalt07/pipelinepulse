@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { api, type DAG, type DAGRun, type Summary } from "@/lib/api";
+import { api, type DAG, type DAGRun, type StuckRun, type Summary } from "@/lib/api";
 import { formatDuration, formatRelativeTime } from "@/lib/utils";
 import { Sidebar } from "@/components/sidebar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,11 +13,13 @@ import { RunChart } from "@/components/run-chart";
 import { AIPanel } from "@/components/ai-panel";
 import { TaskPanel } from "@/components/task-panel";
 import { NotificationsPanel } from "@/components/notifications-panel";
+import { StuckRunsBanner } from "@/components/stuck-runs-banner";
 
 export function Dashboard() {
   const [dags, setDags] = useState<DAG[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [stuck, setStuck] = useState<StuckRun[]>([]);
   const [runs, setRuns] = useState<DAGRun[]>([]);
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -25,9 +27,14 @@ export function Dashboard() {
 
   const loadGlobal = async () => {
     try {
-      const [s, d] = await Promise.all([api.summary(), api.dags()]);
+      const [s, d, st] = await Promise.all([
+        api.summary(),
+        api.dags(),
+        api.stuckRuns().catch(() => []),
+      ]);
       setSummary(s);
       setDags(d);
+      setStuck(st);
       if (!selected && d.length > 0) setSelected(d[0].dag_id);
       setLoadError(null);
     } catch (e) {
@@ -103,6 +110,14 @@ export function Dashboard() {
         </header>
 
         <div className="space-y-6 p-6">
+          <StuckRunsBanner
+            stuck={stuck}
+            onSelect={(dagId, runId) => {
+              setSelected(dagId);
+              setSelectedRun(runId);
+            }}
+          />
+
           {summary && (
             <section className="grid grid-cols-2 gap-3 lg:grid-cols-4">
               <Metric label="Total runs" value={summary.total_runs} />
