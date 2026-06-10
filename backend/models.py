@@ -84,6 +84,16 @@ class ReportRun(Base):
     generated_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+class RunAnnotation(Base):
+    __tablename__ = "run_annotations"
+    __table_args__ = {'extend_existing': True}
+
+    dag_id = Column(String, primary_key=True)
+    run_id = Column(String, primary_key=True)
+    note = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Setting(Base):
     __tablename__ = "settings"
     __table_args__ = {'extend_existing': True}

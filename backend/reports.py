@@ -13,7 +13,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from models import DAGRun, TaskInstance
+from models import DAGRun, TaskInstance, RunAnnotation
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +165,11 @@ def gather_report_data(db: Session, range_: str) -> dict:
                 snippet = failed_task.error_message.strip()
                 if len(snippet) > ERROR_SNIPPET_LIMIT:
                     snippet = snippet[:ERROR_SNIPPET_LIMIT] + "…"
+        annotation = (
+            db.query(RunAnnotation)
+            .filter(RunAnnotation.dag_id == run.dag_id, RunAnnotation.run_id == run.run_id)
+            .first()
+        )
         top_failures.append({
             "dag_id": run.dag_id,
             "run_id": run.run_id,
@@ -172,6 +177,7 @@ def gather_report_data(db: Session, range_: str) -> dict:
             "duration_seconds": run.duration_seconds,
             "failed_task": task_id,
             "error_snippet": snippet,
+            "note": annotation.note if annotation else None,
         })
 
     return {
@@ -297,6 +303,9 @@ def render_markdown(data: dict) -> str:
                 lines.append("```")
             else:
                 lines.append("_No error captured._")
+            if f.get("note"):
+                lines.append("")
+                lines.append(f"> 📝 **Note:** {f['note']}")
             lines.append("")
     else:
         lines.append(f"_No failures in the {range_label.lower()}. 🎉_")

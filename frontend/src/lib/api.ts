@@ -137,6 +137,13 @@ export type SettingsUpdate = Partial<{
   stuck_min_history: number | null;
 }>;
 
+export type RunAnnotation = {
+  dag_id: string;
+  run_id: string;
+  note: string;
+  updated_at: string | null;
+};
+
 export type ReportFormat = "md" | "html" | "pdf";
 export type ReportRange = "7d" | "30d";
 
@@ -278,6 +285,18 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  getAnnotation: (dagId: string, runId: string) =>
+    jsonFetch<RunAnnotation>(`/annotations/${dagId}/${encodeURIComponent(runId)}`),
+  upsertAnnotation: (dagId: string, runId: string, note: string) =>
+    jsonFetch<RunAnnotation>(`/annotations/${dagId}/${encodeURIComponent(runId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    }),
+  listAnnotations: (dagId?: string) =>
+    jsonFetch<{ annotations: RunAnnotation[] }>(
+      dagId ? `/annotations?dag_id=${encodeURIComponent(dagId)}` : "/annotations",
+    ).then((r) => r.annotations),
   getSettings: () => jsonFetch<Settings>("/settings"),
   updateSettings: (body: SettingsUpdate) =>
     jsonFetch<Settings>("/settings", {

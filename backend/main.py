@@ -9,7 +9,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from database import get_db, engine, run_migrations
-from models import Base, DAGRun, TaskInstance, AIInsight, Notification, DagAlertConfig, ReportRun, ReportSchedule
+from models import Base, DAGRun, TaskInstance, AIInsight, Notification, DagAlertConfig, ReportRun, ReportSchedule, RunAnnotation
 from notifier import send_failure_alert, webhook_url
 from scheduler import start_scheduler, resync_run
 from airflow_client import get_task_logs, trigger_dag_run
@@ -359,6 +359,89 @@ def run_diff(dag_id: str, run_id: str, db: Session = Depends(get_db), _: str = D
         "task_changes": task_changes,
         "added_tasks": added,
         "removed_tasks": removed,
+    }
+
+
+class AnnotationUpdate(BaseModel):
+    note: str = Field(default="", max_length=4000)
+
+
+@app.get("/annotations/{dag_id}/{run_id}")
+def get_annotation(
+    dag_id: str,
+    run_id: str,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    row = db.query(RunAnnotation).filter(
+        RunAnnotation.dag_id == dag_id,
+        RunAnnotation.run_id == run_id,
+    ).first()
+    if not row:
+        return {"dag_id": dag_id, "run_id": run_id, "note": "", "updated_at": None}
+    return {
+        "dag_id": row.dag_id,
+        "run_id": row.run_id,
+        "note": row.note,
+        "updated_at": str(row.updated_at) if row.updated_at else None,
+    }
+
+
+@app.put("/annotations/{dag_id}/{run_id}")
+def upsert_annotation(
+    dag_id: str,
+    run_id: str,
+    body: AnnotationUpdate,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    note = body.note.strip()
+    row = db.query(RunAnnotation).filter(
+        RunAnnotation.dag_id == dag_id,
+        RunAnnotation.run_id == run_id,
+    ).first()
+    if not note:
+        # Empty note → delete (idempotent if missing)
+        if row:
+            db.delete(row)
+            db.commit()
+        return {"dag_id": dag_id, "run_id": run_id, "note": "", "updated_at": None}
+    if row is None:
+        row = RunAnnotation(dag_id=dag_id, run_id=run_id, note=note)
+        db.add(row)
+    else:
+        row.note = note
+    db.commit()
+    db.refresh(row)
+    return {
+        "dag_id": row.dag_id,
+        "run_id": row.run_id,
+        "note": row.note,
+        "updated_at": str(row.updated_at) if row.updated_at else None,
+    }
+
+
+@app.get("/annotations")
+def list_annotations(
+    dag_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Bulk-fetch annotations so the runs table can show badges in one round-trip."""
+    q = db.query(RunAnnotation)
+    if dag_id:
+        q = q.filter(RunAnnotation.dag_id == dag_id)
+    rows = q.order_by(RunAnnotation.updated_at.desc()).limit(500).all()
+    return {
+        "annotations": [
+            {
+                "dag_id": r.dag_id,
+                "run_id": r.run_id,
+                "note": r.note,
+                "updated_at": str(r.updated_at) if r.updated_at else None,
+            }
+            for r in rows
+        ]
     }
 
 

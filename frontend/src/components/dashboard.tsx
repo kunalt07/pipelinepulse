@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Inbox, Play, RefreshCw } from "lucide-react";
+import { Inbox, Play, RefreshCw, StickyNote } from "lucide-react";
 import { api, type DAG, type DAGRun, type StuckRun, type Summary } from "@/lib/api";
 import { formatDuration, formatRelativeTime } from "@/lib/utils";
 import { Sidebar, type View } from "@/components/sidebar";
@@ -19,6 +19,7 @@ import { TaskPanel } from "@/components/task-panel";
 import { NotificationsPanel } from "@/components/notifications-panel";
 import { StuckRunsBanner } from "@/components/stuck-runs-banner";
 import { DiffPanel } from "@/components/diff-panel";
+import { AnnotationPanel } from "@/components/annotation-panel";
 import { HealthStrip } from "@/components/health-strip";
 import { EmptyState } from "@/components/empty-state";
 import { AlertConfigPanel } from "@/components/alert-config-panel";
@@ -43,6 +44,7 @@ export function Dashboard() {
   const [triggering, setTriggering] = useState(false);
   const [triggerMsg, setTriggerMsg] = useState<string | null>(null);
   const [view, setView] = useState<View>("dashboard");
+  const [annotated, setAnnotated] = useState<Set<string>>(new Set());
 
   const PAGE_SIZE = 10;
 
@@ -89,6 +91,38 @@ export function Dashboard() {
   useEffect(() => {
     if (selected) loadRuns(selected, range);
   }, [selected, range]);
+
+  useEffect(() => {
+    if (!selected) {
+      setAnnotated(new Set());
+      return;
+    }
+    let cancelled = false;
+    api
+      .listAnnotations(selected)
+      .then((items) => {
+        if (cancelled) return;
+        setAnnotated(new Set(items.map((a) => a.run_id)));
+      })
+      .catch(() => {
+        if (!cancelled) setAnnotated(new Set());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
+  const onAnnotationChange = useCallback(
+    (runId: string) => (hasNote: boolean) => {
+      setAnnotated((prev) => {
+        const next = new Set(prev);
+        if (hasNote) next.add(runId);
+        else next.delete(runId);
+        return next;
+      });
+    },
+    [],
+  );
 
   const refresh = async () => {
     setRefreshing(true);
@@ -336,7 +370,15 @@ export function Dashboard() {
                                 {selectedRun === r.run_id && (
                                   <span className="absolute left-0 top-1/2 h-4 w-[2px] -translate-y-1/2 rounded-full bg-brand/60" />
                                 )}
-                                {r.run_id.length > 36 ? `${r.run_id.slice(0, 36)}…` : r.run_id}
+                                <span className="inline-flex items-center gap-1.5">
+                                  {r.run_id.length > 36 ? `${r.run_id.slice(0, 36)}…` : r.run_id}
+                                  {annotated.has(r.run_id) && (
+                                    <StickyNote
+                                      className="h-3 w-3 text-amber-500"
+                                      aria-label="Has annotation"
+                                    />
+                                  )}
+                                </span>
                               </td>
                               <td className="px-5 py-2.5">
                                 <StatusPill state={r.state} />
@@ -407,6 +449,17 @@ export function Dashboard() {
                         runId={selectedRun ?? undefined}
                         label="Analyze with AI"
                       />
+
+                      {selectedRun && selected && (
+                        <div className="border-t border-border pt-4">
+                          <AnnotationPanel
+                            key={`${selected}/${selectedRun}`}
+                            dagId={selected}
+                            runId={selectedRun}
+                            onChange={onAnnotationChange(selectedRun)}
+                          />
+                        </div>
+                      )}
 
                       {selectedRun &&
                         runs.find((r) => r.run_id === selectedRun)?.state === "failed" && (
