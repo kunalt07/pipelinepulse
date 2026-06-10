@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Activity, BarChart3, FileText, LayoutDashboard, Settings, Star } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Activity, BarChart3, FileText, LayoutDashboard, Search, Settings, Star, X } from "lucide-react";
 import type { DAG } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -48,9 +48,26 @@ function writePinned(pinned: Set<string>) {
 
 export function Sidebar({ dags, selected, onSelect, view, onChangeView }: Props) {
   const [pinned, setPinned] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState("");
+  const filterRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setPinned(readPinned());
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const inField =
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if (!inField && e.key === "/") {
+        e.preventDefault();
+        filterRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   const togglePin = (dagId: string) => {
@@ -63,8 +80,11 @@ export function Sidebar({ dags, selected, onSelect, view, onChangeView }: Props)
     });
   };
 
-  const pinnedDags = dags.filter((d) => pinned.has(d.dag_id));
-  const unpinnedDags = dags.filter((d) => !pinned.has(d.dag_id));
+  const q = filter.trim().toLowerCase();
+  const matches = (d: DAG) => !q || d.dag_id.toLowerCase().includes(q);
+  const pinnedDags = dags.filter((d) => pinned.has(d.dag_id) && matches(d));
+  const unpinnedDags = dags.filter((d) => !pinned.has(d.dag_id) && matches(d));
+  const totalAfterFilter = pinnedDags.length + unpinnedDags.length;
 
   const renderRow = (d: DAG, isPinned: boolean) => (
     <div
@@ -147,25 +167,76 @@ export function Sidebar({ dags, selected, onSelect, view, onChangeView }: Props)
         })}
       </nav>
 
+      <div className="border-b border-border px-3 py-2.5">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/70" />
+          <input
+            ref={filterRef}
+            type="text"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setFilter("");
+                e.currentTarget.blur();
+              }
+            }}
+            placeholder="Filter DAGs"
+            aria-label="Filter DAGs"
+            className="h-7 w-full rounded-md border border-border bg-background pl-7 pr-7 font-mono text-[11px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          />
+          {filter ? (
+            <button
+              onClick={() => setFilter("")}
+              aria-label="Clear filter"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          ) : (
+            <kbd className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded border border-border bg-muted px-1 font-mono text-[9px] font-semibold text-muted-foreground">
+              /
+            </kbd>
+          )}
+        </div>
+      </div>
+
       <div className="flex-1 overflow-y-auto scrollbar-thin px-2 py-3">
-        {pinnedDags.length > 0 && (
+        {totalAfterFilter === 0 ? (
+          <div className="px-3 py-6 text-center text-[11px] font-medium text-muted-foreground">
+            {q ? `No DAGs match "${filter}"` : "No DAGs yet"}
+          </div>
+        ) : (
           <>
-            <div className="px-3 pb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
-              Pinned
-            </div>
-            <div className="flex flex-col gap-0.5">
-              {pinnedDags.map((d) => renderRow(d, true))}
-            </div>
-            <div className="my-3 border-t border-border" />
+            {pinnedDags.length > 0 && (
+              <>
+                <div className="px-3 pb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
+                  Pinned
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {pinnedDags.map((d) => renderRow(d, true))}
+                </div>
+                {unpinnedDags.length > 0 && <div className="my-3 border-t border-border" />}
+              </>
+            )}
+
+            {unpinnedDags.length > 0 && (
+              <>
+                <div className="px-3 pb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
+                  {pinnedDags.length > 0 ? "All DAGs" : "DAGs"}
+                  {q && (
+                    <span className="ml-1.5 normal-case tracking-normal text-muted-foreground/70">
+                      · {totalAfterFilter} match{totalAfterFilter === 1 ? "" : "es"}
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {unpinnedDags.map((d) => renderRow(d, false))}
+                </div>
+              </>
+            )}
           </>
         )}
-
-        <div className="px-3 pb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
-          {pinnedDags.length > 0 ? "All DAGs" : "DAGs"}
-        </div>
-        <div className="flex flex-col gap-0.5">
-          {unpinnedDags.map((d) => renderRow(d, false))}
-        </div>
       </div>
 
       <div className="border-t border-border p-3 text-[11px] font-medium text-muted-foreground">
