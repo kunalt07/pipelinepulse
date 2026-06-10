@@ -22,7 +22,7 @@ const NAV_ITEMS: Array<{ icon: typeof LayoutDashboard; label: string; view: View
   { icon: LayoutDashboard, label: "Dashboard", view: "dashboard", enabled: true },
   { icon: BarChart3, label: "Analytics", view: "analytics", enabled: true },
   { icon: FileText, label: "Reports", view: "reports", enabled: true },
-  { icon: Settings, label: "Settings", view: "settings", enabled: false },
+  { icon: Settings, label: "Settings", view: "settings", enabled: true },
 ];
 
 function readPinned(): Set<string> {

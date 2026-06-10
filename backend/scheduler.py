@@ -326,15 +326,14 @@ def _maybe_generate_scheduled_report():
 
         # Generate via the same library the HTTP endpoint uses.
         import reports as reports_lib  # local import to avoid circular import at module load
-        # AI narrative requires the gemini handle from main.py — we re-resolve from env here
-        # to keep this function self-contained.
+        from settings import get_gemini_config
         gemini_handle = None
-        import os as _os
-        if (_os.getenv("GEMINI_API_KEY") or "").strip():
+        api_key, model = get_gemini_config()
+        if api_key:
             try:
                 import google.generativeai as genai
-                genai.configure(api_key=_os.getenv("GEMINI_API_KEY"))
-                gemini_handle = genai.GenerativeModel(_os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest"))
+                genai.configure(api_key=api_key)
+                gemini_handle = genai.GenerativeModel(model)
             except Exception as e:
                 logger.warning(f"Could not init Gemini for scheduled report: {e}")
 
@@ -371,9 +370,23 @@ def _maybe_generate_scheduled_report():
 
 
 def start_scheduler():
+    from settings import get_setting
     scheduler = BackgroundScheduler()
-    scheduler.add_job(sync_airflow_data, "interval", minutes=2)
-    scheduler.add_job(_maybe_generate_scheduled_report, "interval", minutes=15)
+    initial_interval = int(get_setting("sync_interval_minutes", cast=int))
+    scheduler.add_job(
+        sync_airflow_data,
+        "interval",
+        minutes=initial_interval,
+        id="sync_airflow_data",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _maybe_generate_scheduled_report,
+        "interval",
+        minutes=15,
+        id="maybe_generate_scheduled_report",
+        replace_existing=True,
+    )
     scheduler.start()
     sync_airflow_data()
     return scheduler

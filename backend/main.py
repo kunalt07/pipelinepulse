@@ -16,19 +16,37 @@ from airflow_client import get_task_logs, trigger_dag_run
 import reports as reports_lib
 import google.generativeai as genai
 from dotenv import load_dotenv
+from settings import get_gemini_config, get_setting, register_scheduler as register_settings_scheduler
 
 load_dotenv()
 
-GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
-GEMINI_ENABLED = bool(GEMINI_API_KEY)
-if GEMINI_ENABLED:
-    genai.configure(api_key=GEMINI_API_KEY)
-    gemini = genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest"))
-else:
-    gemini = None
-
 Base.metadata.create_all(bind=engine)
 run_migrations()
+
+
+# Gemini handle is built lazily and cached by (api_key, model) so settings
+# changes propagate without a process restart.
+_gemini_cache: dict[tuple[str, str], "genai.GenerativeModel"] = {}
+
+
+def get_gemini():
+    """Returns a configured GenerativeModel or None when no key is available."""
+    api_key, model = get_gemini_config()
+    if not api_key:
+        return None
+    cache_key = (api_key, model)
+    if cache_key not in _gemini_cache:
+        try:
+            genai.configure(api_key=api_key)
+            _gemini_cache[cache_key] = genai.GenerativeModel(model)
+        except Exception:
+            return None
+    return _gemini_cache[cache_key]
+
+
+def gemini_enabled() -> bool:
+    api_key, _ = get_gemini_config()
+    return bool(api_key)
 
 app = FastAPI(title="PipelinePulse API")
 
@@ -69,13 +87,14 @@ def require_auth(creds: Optional[HTTPBasicCredentials] = Depends(basic_auth)):
 
 
 scheduler = start_scheduler()
+register_settings_scheduler(scheduler)
 
 @app.get("/")
 def root():
     return {
         "status": "PipelinePulse is running",
         "auth_required": AUTH_ENABLED,
-        "ai_enabled": GEMINI_ENABLED,
+        "ai_enabled": gemini_enabled(),
         "alerts_enabled": webhook_url() is not None,
     }
 
@@ -366,11 +385,6 @@ def task_logs(dag_id: str, run_id: str, task_id: str, attempt: int = 1, _: str =
         return {"logs": "", "attempt": attempt, "empty": True}
     return {"logs": text[-50000:], "attempt": attempt, "empty": False}
 
-STUCK_MIN_HISTORY = 5
-STUCK_MULTIPLIER = 2.0
-STUCK_FLOOR_SECONDS = 60.0
-
-
 def _percentile(values: list[float], pct: float) -> float:
     if not values:
         return 0.0
@@ -399,6 +413,10 @@ def stuck_runs(db: Session = Depends(get_db), _: str = Depends(require_auth)):
     p95_cache: dict[str, Optional[float]] = {}
     stuck = []
 
+    min_history = int(get_setting("stuck_min_history", cast=int))
+    multiplier = float(get_setting("stuck_multiplier", cast=float))
+    floor_seconds = float(get_setting("stuck_floor_seconds", cast=float))
+
     for r in running:
         if r.dag_id not in p95_cache:
             durations = [
@@ -410,13 +428,13 @@ def stuck_runs(db: Session = Depends(get_db), _: str = Depends(require_auth)):
                 ).all()
                 if d is not None and d > 0
             ]
-            p95_cache[r.dag_id] = _percentile(durations, 95) if len(durations) >= STUCK_MIN_HISTORY else None
+            p95_cache[r.dag_id] = _percentile(durations, 95) if len(durations) >= min_history else None
 
         p95 = p95_cache[r.dag_id]
         if p95 is None:
             continue
 
-        threshold = max(p95 * STUCK_MULTIPLIER, STUCK_FLOOR_SECONDS)
+        threshold = max(p95 * multiplier, floor_seconds)
         elapsed = (now - r.start_date).total_seconds()
         if elapsed > threshold:
             stuck.append({
@@ -574,8 +592,9 @@ def pipeline_summary(db: Session = Depends(get_db), _: str = Depends(require_aut
 
 @app.get("/ai/explain/{dag_id}/{run_id}")
 def explain_failure(dag_id: str, run_id: str, db: Session = Depends(get_db), _: str = Depends(require_auth)):
-    if not GEMINI_ENABLED:
-        return {"insight": "AI features are disabled. Set GEMINI_API_KEY in your .env to enable."}
+    gemini = get_gemini()
+    if gemini is None:
+        return {"insight": "AI features are disabled. Set GEMINI_API_KEY in your .env or via Settings to enable."}
 
     tasks = db.query(TaskInstance).filter(
         TaskInstance.dag_id == dag_id,
@@ -634,8 +653,9 @@ Keep it concise and actionable.
 
 @app.get("/ai/stakeholder/{dag_id}")
 def stakeholder_summary(dag_id: str, db: Session = Depends(get_db), _: str = Depends(require_auth)):
-    if not GEMINI_ENABLED:
-        return {"summary": "AI features are disabled. Set GEMINI_API_KEY in your .env to enable."}
+    gemini = get_gemini()
+    if gemini is None:
+        return {"summary": "AI features are disabled. Set GEMINI_API_KEY in your .env or via Settings to enable."}
 
     runs = db.query(DAGRun).filter(DAGRun.dag_id == dag_id).order_by(DAGRun.synced_at.desc()).limit(10).all()
 
@@ -677,8 +697,10 @@ def _build_report(db: Session, range_: str, with_ai: bool = True) -> dict:
     if range_ not in reports_lib.REPORT_RANGES:
         raise HTTPException(status_code=400, detail="range must be 7d or 30d")
     data = reports_lib.gather_report_data(db, range_)
-    if with_ai and GEMINI_ENABLED:
-        data["ai_narrative"] = reports_lib.generate_ai_narrative(data, gemini)
+    if with_ai:
+        gemini = get_gemini()
+        if gemini is not None:
+            data["ai_narrative"] = reports_lib.generate_ai_narrative(data, gemini)
     return data
 
 
@@ -859,3 +881,141 @@ def upsert_report_schedule(
     db.commit()
     db.refresh(s)
     return _serialize_schedule(s)
+
+
+# ---------- Settings ----------
+
+import settings as settings_lib
+from scheduler import sync_airflow_data as _sync_airflow_data
+
+
+SETTING_VALIDATORS: dict[str, dict] = {
+    "sync_interval_minutes": {"type": int, "min": 1, "max": 60},
+    "stuck_multiplier": {"type": float, "min": 1.5, "max": 10.0},
+    "stuck_floor_seconds": {"type": float, "min": 30.0, "max": 600.0},
+    "stuck_min_history": {"type": int, "min": 3, "max": 20},
+    "gemini_model": {"type": str, "pattern": r"^[a-z0-9._\-]+$", "max_len": 80},
+    "gemini_api_key": {"type": str, "max_len": 200},
+    "webhook_url": {"type": str, "max_len": 500},
+}
+
+
+def _validate_setting(key: str, raw):
+    spec = SETTING_VALIDATORS.get(key)
+    if spec is None:
+        raise HTTPException(status_code=400, detail=f"Unknown setting: {key}")
+    expected = spec["type"]
+    # Allow None (clears)
+    if raw is None:
+        return None
+    # JSON numbers come through as int/float natively; coerce numerics from str if needed
+    if expected in (int, float):
+        try:
+            value = expected(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{key} must be {expected.__name__}")
+        if "min" in spec and value < spec["min"]:
+            raise HTTPException(status_code=400, detail=f"{key} must be >= {spec['min']}")
+        if "max" in spec and value > spec["max"]:
+            raise HTTPException(status_code=400, detail=f"{key} must be <= {spec['max']}")
+        return value
+    # str
+    value = str(raw).strip()
+    if "max_len" in spec and len(value) > spec["max_len"]:
+        raise HTTPException(status_code=400, detail=f"{key} too long (max {spec['max_len']})")
+    if "pattern" in spec:
+        import re
+        if value and not re.fullmatch(spec["pattern"], value):
+            raise HTTPException(status_code=400, detail=f"{key} format invalid")
+    return value
+
+
+def _serialize_settings() -> dict:
+    """Returns full settings snapshot. Secrets reveal only set/unset state."""
+    out: dict = {}
+    for key in settings_lib.DEFAULTS.keys():
+        if key in settings_lib.SECRET_KEYS:
+            out[key] = {
+                "set": settings_lib.is_set(key),
+                "db_override": settings_lib.is_db_set(key),
+            }
+        else:
+            out[key] = settings_lib.get_setting(
+                key,
+                cast=SETTING_VALIDATORS.get(key, {}).get("type"),
+            )
+    return out
+
+
+@app.get("/settings")
+def read_settings(_: str = Depends(require_auth)):
+    return _serialize_settings()
+
+
+@app.put("/settings")
+def write_settings(body: dict, _: str = Depends(require_auth)):
+    """Bulk upsert. For secrets: omit the key to leave alone, send null to clear,
+    send a string to set. For non-secrets: send the new value, or empty string / null to reset."""
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    needs_reschedule = False
+    for key, raw in body.items():
+        if key not in SETTING_VALIDATORS:
+            raise HTTPException(status_code=400, detail=f"Unknown setting: {key}")
+        if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+            settings_lib.clear_setting(key)
+        else:
+            value = _validate_setting(key, raw)
+            settings_lib.set_setting(key, value)
+        if key == "sync_interval_minutes":
+            needs_reschedule = True
+
+    # _on_change handles reschedule, but note it explicitly in logs for visibility.
+    if needs_reschedule:
+        import logging as _logging
+        _logging.getLogger(__name__).info("Sync interval setting changed")
+
+    return _serialize_settings()
+
+
+# ---------- Danger zone ----------
+
+@app.post("/settings/danger/reset-alert-configs")
+def danger_reset_alert_configs(db: Session = Depends(get_db), _: str = Depends(require_auth)):
+    deleted = db.query(DagAlertConfig).delete()
+    db.commit()
+    return {"deleted": deleted}
+
+
+@app.post("/settings/danger/clear-notifications")
+def danger_clear_notifications(db: Session = Depends(get_db), _: str = Depends(require_auth)):
+    deleted = db.query(Notification).delete()
+    db.commit()
+    return {"deleted": deleted}
+
+
+@app.post("/settings/danger/clear-reports")
+def danger_clear_reports(db: Session = Depends(get_db), _: str = Depends(require_auth)):
+    deleted = db.query(ReportRun).delete()
+    db.commit()
+    return {"deleted": deleted}
+
+
+@app.post("/settings/danger/full-resync")
+def danger_full_resync(db: Session = Depends(get_db), _: str = Depends(require_auth)):
+    """Truncate dag_runs + task_instances, then immediately re-pull from Airflow.
+    Synchronous — typically completes in <30s for a small DAG set."""
+    runs_deleted = db.query(DAGRun).delete()
+    tasks_deleted = db.query(TaskInstance).delete()
+    db.commit()
+    try:
+        _sync_airflow_data()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Re-sync failed after truncation: {e}")
+    runs_now = db.query(DAGRun).count()
+    return {
+        "runs_deleted": runs_deleted,
+        "tasks_deleted": tasks_deleted,
+        "runs_pulled": runs_now,
+    }

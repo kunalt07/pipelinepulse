@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 
 
 def webhook_url() -> Optional[str]:
-    return (os.getenv("WEBHOOK_URL") or "").strip() or None
+    # Settings table overrides env at runtime; helper falls through to env on unset.
+    from settings import get_webhook_url
+    return get_webhook_url()
 
 
 def airflow_run_url(dag_id: str, run_id: str) -> Optional[str]:

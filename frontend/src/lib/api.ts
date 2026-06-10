@@ -115,6 +115,28 @@ export type RunDiff = {
   removed_tasks: string[];
 };
 
+export type SecretSetting = { set: boolean; db_override: boolean };
+
+export type Settings = {
+  webhook_url: SecretSetting;
+  gemini_api_key: SecretSetting;
+  gemini_model: string;
+  sync_interval_minutes: number;
+  stuck_multiplier: number;
+  stuck_floor_seconds: number;
+  stuck_min_history: number;
+};
+
+export type SettingsUpdate = Partial<{
+  webhook_url: string | null;
+  gemini_api_key: string | null;
+  gemini_model: string | null;
+  sync_interval_minutes: number | null;
+  stuck_multiplier: number | null;
+  stuck_floor_seconds: number | null;
+  stuck_min_history: number | null;
+}>;
+
 export type ReportFormat = "md" | "html" | "pdf";
 export type ReportRange = "7d" | "30d";
 
@@ -256,6 +278,24 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  getSettings: () => jsonFetch<Settings>("/settings"),
+  updateSettings: (body: SettingsUpdate) =>
+    jsonFetch<Settings>("/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  dangerResetAlertConfigs: () =>
+    jsonFetch<{ deleted: number }>("/settings/danger/reset-alert-configs", { method: "POST" }),
+  dangerClearNotifications: () =>
+    jsonFetch<{ deleted: number }>("/settings/danger/clear-notifications", { method: "POST" }),
+  dangerClearReports: () =>
+    jsonFetch<{ deleted: number }>("/settings/danger/clear-reports", { method: "POST" }),
+  dangerFullResync: () =>
+    jsonFetch<{ runs_deleted: number; tasks_deleted: number; runs_pulled: number }>(
+      "/settings/danger/full-resync",
+      { method: "POST" },
+    ),
 };
 
 export function downloadBlob(blob: Blob, filename: string) {

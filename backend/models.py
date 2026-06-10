@@ -84,6 +84,15 @@ class ReportRun(Base):
     generated_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+class Setting(Base):
+    __tablename__ = "settings"
+    __table_args__ = {'extend_existing': True}
+
+    key = Column(String, primary_key=True)
+    value = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class ReportSchedule(Base):
     __tablename__ = "report_schedules"
     __table_args__ = {'extend_existing': True}
