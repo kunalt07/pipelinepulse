@@ -15,9 +15,12 @@
     --border: 240 6% 90%;
     --input: 240 6% 90%;
     --ring: 240 5% 65%;
+    --sidebar: 240 5% 96%;
     --success: 142 71% 45%;
     --danger: 0 72% 51%;
     --warning: 38 92% 50%;
+    --brand: 142 71% 45%;
+    --brand-foreground: 0 0% 100%;
   }
 
   .dark {
@@ -32,9 +35,12 @@
     --border: 240 4% 14%;
     --input: 240 4% 14%;
     --ring: 240 5% 30%;
+    --sidebar: 240 8% 6%;
     --success: 142 71% 45%;
     --danger: 0 72% 60%;
     --warning: 38 92% 55%;
+    --brand: 142 71% 45%;
+    --brand-foreground: 0 0% 100%;
   }
 
   * {
@@ -44,6 +50,9 @@
   body {
     @apply bg-background text-foreground antialiased;
     font-feature-settings: "rlig" 1, "calt" 1, "ss01" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-weight: 450;
   }
 }
 
@@ -59,5 +68,25 @@
   .scrollbar-thin::-webkit-scrollbar-thumb {
     background-color: hsl(var(--border));
     border-radius: 3px;
+  }
+
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      hsl(var(--muted)) 0%,
+      hsl(var(--accent)) 50%,
+      hsl(var(--muted)) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.6s ease-in-out infinite;
+  }
+
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  .glow-brand {
+    box-shadow: 0 0 0 1px hsl(var(--brand) / 0.4), 0 0 20px hsl(var(--brand) / 0.25);
   }
 }

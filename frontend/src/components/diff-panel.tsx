@@ -5,6 +5,7 @@ import { GitCompare } from "lucide-react";
 import { api, type RunDiff } from "@/lib/api";
 import { formatDuration, formatRelativeTime } from "@/lib/utils";
 import { StatusPill } from "@/components/status-pill";
+import { EmptyState } from "@/components/empty-state";
 
 type Props = {
   dagId: string;
@@ -46,15 +47,25 @@ export function DiffPanel({ dagId, runId }: Props) {
     };
   }, [dagId, runId]);
 
-  if (loading) return <p className="text-xs text-muted-foreground">Comparing…</p>;
-  if (error) return <p className="text-xs text-destructive">{error}</p>;
+  if (loading) {
+    return (
+      <div className="space-y-2">
+        <div className="h-3 w-3/4 rounded shimmer" />
+        <div className="h-9 rounded shimmer" />
+        <div className="h-9 rounded shimmer" />
+      </div>
+    );
+  }
+  if (error) return <p className="text-xs text-danger">{error}</p>;
   if (!diff) return null;
 
   if (!diff.baseline) {
     return (
-      <p className="text-xs text-muted-foreground">
-        No prior successful run to compare against.
-      </p>
+      <EmptyState
+        icon={GitCompare}
+        title="Nothing to diff"
+        hint="No prior successful run for this DAG."
+      />
     );
   }
 
@@ -111,7 +122,7 @@ export function DiffPanel({ dagId, runId }: Props) {
               </div>
               {c.duration_delta_seconds != null && (
                 <span
-                  className={`shrink-0 tabular-nums text-xs ${
+                  className={`shrink-0 tabular-nums text-xs font-semibold ${
                     c.duration_delta_seconds > 0
                       ? "text-amber-500"
                       : "text-emerald-500"

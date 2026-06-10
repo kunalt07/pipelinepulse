@@ -5,6 +5,7 @@ const STATE_STYLES: Record<string, string> = {
   failed: "bg-danger/10 text-danger border-danger/20",
   running: "bg-blue-500/10 text-blue-500 border-blue-500/20",
   queued: "bg-muted text-muted-foreground border-border",
+  upstream_failed: "bg-amber-500/10 text-amber-500 border-amber-500/30",
 };
 
 export function StatusPill({ state, className }: { state: string; className?: string }) {
@@ -12,7 +13,7 @@ export function StatusPill({ state, className }: { state: string; className?: st
   return (
     <span
       className={cn(
-        "inline-flex h-5 items-center rounded-full border px-2 text-[11px] font-medium capitalize",
+        "inline-flex h-5 items-center rounded-full border px-2 text-[11px] font-semibold capitalize",
         style,
         className,
       )}
@@ -22,10 +23,11 @@ export function StatusPill({ state, className }: { state: string; className?: st
           "bg-success": state === "success",
           "bg-danger": state === "failed",
           "bg-blue-500 animate-pulse": state === "running",
-          "bg-muted-foreground": !["success", "failed", "running"].includes(state),
+          "bg-amber-500": state === "upstream_failed",
+          "bg-muted-foreground": !["success", "failed", "running", "upstream_failed"].includes(state),
         })}
       />
-      {state}
+      {state.replace(/_/g, " ")}
     </span>
   );
 }

@@ -11,8 +11,10 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { Activity } from "lucide-react";
 import type { DAGRun } from "@/lib/api";
 import { formatDuration } from "@/lib/utils";
+import { EmptyState } from "@/components/empty-state";
 
 type Datum = {
   index: number;
@@ -29,6 +31,7 @@ const COLORS: Record<string, string> = {
   failed: "hsl(0 72% 60%)",
   running: "hsl(217 91% 60%)",
   queued: "hsl(240 5% 50%)",
+  upstream_failed: "hsl(38 92% 50%)",
 };
 
 function percentile(values: number[], p: number): number {
@@ -82,9 +85,12 @@ export function RunChart({ runs }: { runs: DAGRun[] }) {
 
   if (data.length === 0) {
     return (
-      <div className="flex h-72 items-center justify-center text-sm text-muted-foreground">
-        No runs yet
-      </div>
+      <EmptyState
+        icon={Activity}
+        title="No runs in this range"
+        hint="Try widening the time range or wait for the next sync."
+        className="h-72"
+      />
     );
   }
 
@@ -95,7 +101,7 @@ export function RunChart({ runs }: { runs: DAGRun[] }) {
 
   return (
     <div className="space-y-3">
-      <div className="h-64 w-full">
+      <div className="h-72 w-full">
         <ResponsiveContainer>
           <BarChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
             <CartesianGrid stroke="hsl(var(--border))" strokeOpacity={0.4} vertical={false} />
@@ -165,3 +171,5 @@ function Legend() {
     </div>
   );
 }
+
+export const RUN_COLORS = COLORS;
