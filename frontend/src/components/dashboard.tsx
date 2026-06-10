@@ -7,6 +7,7 @@ import { api, type DAG, type DAGRun, type StuckRun, type Summary } from "@/lib/a
 import { formatDuration, formatRelativeTime } from "@/lib/utils";
 import { Sidebar, type View } from "@/components/sidebar";
 import { AnalyticsView } from "@/components/analytics-view";
+import { ReportsView } from "@/components/reports-view";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Metric } from "@/components/metric";
@@ -75,6 +76,13 @@ export function Dashboard() {
 
   useEffect(() => {
     loadGlobal();
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const v = params.get("view");
+      if (v === "reports" || v === "analytics" || v === "settings" || v === "dashboard") {
+        setView(v);
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -174,6 +182,7 @@ export function Dashboard() {
 
       <main className="flex-1 overflow-y-auto scrollbar-thin">
         {view === "analytics" && <AnalyticsView />}
+        {view === "reports" && <ReportsView />}
         {view === "dashboard" && (
         <>
         <header className="sticky top-0 z-10 flex h-14 items-center justify-between border-b bg-background/80 px-6 backdrop-blur">

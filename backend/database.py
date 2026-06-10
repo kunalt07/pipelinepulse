@@ -26,6 +26,11 @@ def run_migrations():
 
     statements = [
         "ALTER TABLE task_instances ADD COLUMN IF NOT EXISTS try_number INTEGER",
+        # Reports (Stage 5/6 — columns kept in lock-step with models.ReportRun/ReportSchedule)
+        "ALTER TABLE report_runs ADD COLUMN IF NOT EXISTS summary_line VARCHAR",
+        "ALTER TABLE report_runs ADD COLUMN IF NOT EXISTS delivered VARCHAR",
+        "ALTER TABLE report_runs ADD COLUMN IF NOT EXISTS webhook_url VARCHAR",
+        "ALTER TABLE report_schedules ADD COLUMN IF NOT EXISTS webhook_url VARCHAR",
     ]
     with engine.begin() as conn:
         for stmt in statements:

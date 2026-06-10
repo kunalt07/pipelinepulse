@@ -115,6 +115,32 @@ export type RunDiff = {
   removed_tasks: string[];
 };
 
+export type ReportFormat = "md" | "html" | "pdf";
+export type ReportRange = "7d" | "30d";
+
+export type ReportHistoryItem = {
+  id: number;
+  range: ReportRange;
+  format: ReportFormat;
+  source: "manual" | "scheduled";
+  summary_line: string | null;
+  delivered: string | null;
+  generated_at: string | null;
+};
+
+export type ReportSchedule = {
+  enabled: boolean;
+  frequency: "weekly" | "monthly";
+  day_of_week: number;
+  day_of_month: number;
+  hour: number;
+  range: ReportRange;
+  format: ReportFormat;
+  webhook_url: string | null;
+  last_sent_at: string | null;
+  global_webhook_configured: boolean;
+};
+
 export type TaskInstance = {
   task_id: string;
   state: string;
@@ -137,6 +163,26 @@ async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
   if (res.status === 401) throw new Error("Unauthorized — check AUTH_USER/AUTH_PASS");
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
   return res.json();
+}
+
+async function blobFetch(
+  path: string,
+  init?: RequestInit,
+): Promise<{ blob: Blob; filename: string | null; reportId: number | null; summary: string | null }> {
+  const headers = { ...authHeaders(), ...(init?.headers ?? {}) };
+  const res = await fetch(`${API_URL}${path}`, { cache: "no-store", ...init, headers });
+  if (res.status === 401) throw new Error("Unauthorized — check AUTH_USER/AUTH_PASS");
+  if (!res.ok) throw new Error(`${path} → ${res.status}`);
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const match = /filename="([^"]+)"/.exec(disposition);
+  const idHeader = res.headers.get("X-Report-Id");
+  const summary = res.headers.get("X-Report-Summary");
+  return {
+    blob: await res.blob(),
+    filename: match ? match[1] : null,
+    reportId: idHeader ? Number(idHeader) : null,
+    summary,
+  };
 }
 
 export const api = {
@@ -197,4 +243,28 @@ export const api = {
     }>("/notifications"),
   testNotification: () =>
     jsonFetch<{ delivered: string }>("/notifications/test", { method: "POST" }),
+  generateReport: (range: ReportRange, format: ReportFormat) =>
+    blobFetch(`/reports?range=${range}&format=${format}`),
+  reportHistory: () =>
+    jsonFetch<{ reports: ReportHistoryItem[] }>("/reports/history").then((r) => r.reports),
+  downloadStoredReport: (id: number, format: ReportFormat) =>
+    blobFetch(`/reports/history/${id}?format=${format}`),
+  getReportSchedule: () => jsonFetch<ReportSchedule>("/reports/schedule"),
+  updateReportSchedule: (body: Omit<ReportSchedule, "last_sent_at" | "global_webhook_configured">) =>
+    jsonFetch<ReportSchedule>("/reports/schedule", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 };
+
+export function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

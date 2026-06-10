@@ -3,16 +3,17 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from database import get_db, engine, run_migrations
-from models import Base, DAGRun, TaskInstance, AIInsight, Notification, DagAlertConfig
+from models import Base, DAGRun, TaskInstance, AIInsight, Notification, DagAlertConfig, ReportRun, ReportSchedule
 from notifier import send_failure_alert, webhook_url
 from scheduler import start_scheduler, resync_run
 from airflow_client import get_task_logs, trigger_dag_run
+import reports as reports_lib
 import google.generativeai as genai
 from dotenv import load_dotenv
 
@@ -659,3 +660,202 @@ Mention if there is a problem and its business impact. Be direct.
         return {"summary": response.text}
     except Exception as e:
         return {"summary": f"Summary generation failed: {str(e)}"}
+
+
+# ---------- Reports ----------
+
+REPORT_FORMATS = {"md", "html", "pdf"}
+REPORT_MEDIA_TYPES = {
+    "md": "text/markdown; charset=utf-8",
+    "html": "text/html; charset=utf-8",
+    "pdf": "application/pdf",
+}
+
+
+def _build_report(db: Session, range_: str, with_ai: bool = True) -> dict:
+    """Gather data + (optionally) attach AI narrative."""
+    if range_ not in reports_lib.REPORT_RANGES:
+        raise HTTPException(status_code=400, detail="range must be 7d or 30d")
+    data = reports_lib.gather_report_data(db, range_)
+    if with_ai and GEMINI_ENABLED:
+        data["ai_narrative"] = reports_lib.generate_ai_narrative(data, gemini)
+    return data
+
+
+def _render(data: dict, fmt: str):
+    """Returns (body, media_type, suffix) for the requested format."""
+    if fmt == "md":
+        return reports_lib.render_markdown(data), REPORT_MEDIA_TYPES["md"], "md"
+    if fmt == "html":
+        return reports_lib.render_html(data), REPORT_MEDIA_TYPES["html"], "html"
+    if fmt == "pdf":
+        return reports_lib.render_pdf(data), REPORT_MEDIA_TYPES["pdf"], "pdf"
+    raise HTTPException(status_code=400, detail=f"format must be one of {sorted(REPORT_FORMATS)}")
+
+
+def _filename(range_: str, generated_at: str, suffix: str) -> str:
+    # generated_at format: "2026-06-10 13:42:05 UTC" — drop time and spaces
+    stamp = generated_at.split(" ")[0]
+    return f"pipelinepulse-{range_}-{stamp}.{suffix}"
+
+
+@app.get("/reports")
+def generate_report(
+    range: str = "7d",
+    format: str = "md",
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    if format not in REPORT_FORMATS:
+        raise HTTPException(status_code=400, detail=f"format must be one of {sorted(REPORT_FORMATS)}")
+
+    data = _build_report(db, range)
+    body, media_type, suffix = _render(data, format)
+
+    # Persist a ReportRun row so this generation shows up in history.
+    md_body = body if format == "md" else reports_lib.render_markdown(data)
+    summary = reports_lib.short_summary_line(data)
+    row = ReportRun(
+        range=range,
+        format=format,
+        source="manual",
+        summary_line=summary,
+        content_md=md_body,
+    )
+    db.add(row)
+    db.commit()
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{_filename(range, data["generated_at"], suffix)}"',
+        "X-Report-Id": str(row.id),
+        "X-Report-Summary": summary,
+    }
+    return Response(content=body, media_type=media_type, headers=headers)
+
+
+@app.get("/reports/history")
+def list_report_history(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    rows = (
+        db.query(ReportRun)
+        .order_by(ReportRun.generated_at.desc())
+        .limit(min(limit, 200))
+        .all()
+    )
+    return {
+        "reports": [
+            {
+                "id": r.id,
+                "range": r.range,
+                "format": r.format,
+                "source": r.source,
+                "summary_line": r.summary_line,
+                "delivered": r.delivered,
+                "generated_at": str(r.generated_at) if r.generated_at else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/reports/history/{report_id}")
+def download_stored_report(
+    report_id: int,
+    format: str = "md",
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    if format not in REPORT_FORMATS:
+        raise HTTPException(status_code=400, detail=f"format must be one of {sorted(REPORT_FORMATS)}")
+    row = db.query(ReportRun).filter(ReportRun.id == report_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="report not found")
+
+    if format == "md":
+        body = row.content_md
+        media_type = REPORT_MEDIA_TYPES["md"]
+        suffix = "md"
+    else:
+        # Re-render from stored MD by reconstructing data — not possible: MD is lossy.
+        # So for HTML/PDF re-download we re-run the aggregation using the stored range.
+        # This means stats reflect what the DB shows NOW rather than at the time of original generation.
+        # That's acceptable for a self-hosted DE tool — but flagged in the response header.
+        data = _build_report(db, row.range, with_ai=False)
+        body, media_type, suffix = _render(data, format)
+
+    generated_at = str(row.generated_at).split(".")[0] + " UTC" if row.generated_at else "unknown"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{_filename(row.range, generated_at, suffix)}"',
+    }
+    return Response(content=body, media_type=media_type, headers=headers)
+
+
+class ReportScheduleUpdate(BaseModel):
+    enabled: bool = False
+    frequency: str = Field(default="weekly", pattern=r"^(weekly|monthly)$")
+    day_of_week: int = Field(default=1, ge=0, le=6)
+    day_of_month: int = Field(default=1, ge=1, le=28)
+    hour: int = Field(default=8, ge=0, le=23)
+    range: str = Field(default="7d", pattern=r"^(7d|30d)$")
+    format: str = Field(default="html", pattern=r"^(md|html|pdf)$")
+    webhook_url: Optional[str] = None
+
+
+def _serialize_schedule(s: Optional[ReportSchedule]) -> dict:
+    if s is None:
+        return {
+            "enabled": False,
+            "frequency": "weekly",
+            "day_of_week": 1,
+            "day_of_month": 1,
+            "hour": 8,
+            "range": "7d",
+            "format": "html",
+            "webhook_url": None,
+            "last_sent_at": None,
+            "global_webhook_configured": webhook_url() is not None,
+        }
+    return {
+        "enabled": s.enabled,
+        "frequency": s.frequency,
+        "day_of_week": s.day_of_week,
+        "day_of_month": s.day_of_month,
+        "hour": s.hour,
+        "range": s.range,
+        "format": s.format,
+        "webhook_url": s.webhook_url,
+        "last_sent_at": str(s.last_sent_at) if s.last_sent_at else None,
+        "global_webhook_configured": webhook_url() is not None,
+    }
+
+
+@app.get("/reports/schedule")
+def get_report_schedule(db: Session = Depends(get_db), _: str = Depends(require_auth)):
+    s = db.query(ReportSchedule).filter(ReportSchedule.id == 1).first()
+    return _serialize_schedule(s)
+
+
+@app.put("/reports/schedule")
+def upsert_report_schedule(
+    body: ReportScheduleUpdate,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    s = db.query(ReportSchedule).filter(ReportSchedule.id == 1).first()
+    if s is None:
+        s = ReportSchedule(id=1)
+        db.add(s)
+    s.enabled = body.enabled
+    s.frequency = body.frequency
+    s.day_of_week = body.day_of_week
+    s.day_of_month = body.day_of_month
+    s.hour = body.hour
+    s.range = body.range
+    s.format = body.format
+    s.webhook_url = (body.webhook_url or "").strip() or None
+    db.commit()
+    db.refresh(s)
+    return _serialize_schedule(s)

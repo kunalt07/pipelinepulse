@@ -1,10 +1,10 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
 from database import SessionLocal
-from models import DAGRun, TaskInstance, Notification, DagAlertConfig
+from models import DAGRun, TaskInstance, Notification, DagAlertConfig, ReportRun, ReportSchedule
 from airflow_client import get_dags, get_dag_runs, get_task_instances, get_task_logs
-from notifier import send_failure_alert, webhook_url
-from datetime import datetime, time, timezone
+from notifier import send_failure_alert, send_report_notification, webhook_url
+from datetime import datetime, time, timedelta, timezone
 import logging
 
 try:
@@ -291,9 +291,89 @@ def resync_run(dag_id: str, run_id: str) -> dict:
         db.close()
 
 
+def _is_schedule_due(s: ReportSchedule, now: datetime) -> bool:
+    """Returns True if the schedule should fire in the current 15-min check window."""
+    if not s.enabled:
+        return False
+    if now.hour != s.hour:
+        return False
+    if s.frequency == "weekly":
+        if now.weekday() != s.day_of_week:
+            return False
+    elif s.frequency == "monthly":
+        if now.day != s.day_of_month:
+            return False
+    else:
+        return False
+    # Dedup: don't fire twice in the same period
+    if s.last_sent_at is not None:
+        # Same calendar day → already sent
+        if s.last_sent_at.date() == now.date():
+            return False
+    return True
+
+
+def _maybe_generate_scheduled_report():
+    """Runs every 15 min; checks whether a scheduled report is due and generates it."""
+    db = SessionLocal()
+    try:
+        s = db.query(ReportSchedule).filter(ReportSchedule.id == 1).first()
+        if s is None:
+            return
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if not _is_schedule_due(s, now):
+            return
+
+        # Generate via the same library the HTTP endpoint uses.
+        import reports as reports_lib  # local import to avoid circular import at module load
+        # AI narrative requires the gemini handle from main.py — we re-resolve from env here
+        # to keep this function self-contained.
+        gemini_handle = None
+        import os as _os
+        if (_os.getenv("GEMINI_API_KEY") or "").strip():
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=_os.getenv("GEMINI_API_KEY"))
+                gemini_handle = genai.GenerativeModel(_os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest"))
+            except Exception as e:
+                logger.warning(f"Could not init Gemini for scheduled report: {e}")
+
+        data = reports_lib.gather_report_data(db, s.range)
+        if gemini_handle is not None:
+            data["ai_narrative"] = reports_lib.generate_ai_narrative(data, gemini_handle)
+        md = reports_lib.render_markdown(data)
+        summary = reports_lib.short_summary_line(data)
+        range_label = "weekly" if s.range == "7d" else "monthly"
+
+        row = ReportRun(
+            range=s.range,
+            format=s.format,
+            source="scheduled",
+            summary_line=summary,
+            content_md=md,
+        )
+        db.add(row)
+        db.flush()  # get row.id
+
+        delivered = send_report_notification(
+            row.id, range_label, summary, override_url=s.webhook_url
+        )
+        row.delivered = delivered
+        row.webhook_url = s.webhook_url or webhook_url() or ""
+        s.last_sent_at = now
+        db.commit()
+        logger.info(f"Scheduled report #{row.id} generated and notified: {delivered}")
+    except Exception as e:
+        logger.error(f"Scheduled report generation failed: {e}", exc_info=True)
+        db.rollback()
+    finally:
+        db.close()
+
+
 def start_scheduler():
     scheduler = BackgroundScheduler()
     scheduler.add_job(sync_airflow_data, "interval", minutes=2)
+    scheduler.add_job(_maybe_generate_scheduled_report, "interval", minutes=15)
     scheduler.start()
     sync_airflow_data()
     return scheduler

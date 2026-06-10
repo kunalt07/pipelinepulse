@@ -67,3 +67,35 @@ class DagAlertConfig(Base):
     quiet_hours_end = Column(String, nullable=True)     # "HH:MM" or null
     quiet_timezone = Column(String, nullable=True)      # IANA tz, e.g. "America/Los_Angeles"
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ReportRun(Base):
+    __tablename__ = "report_runs"
+    __table_args__ = {'extend_existing': True}
+
+    id = Column(Integer, primary_key=True, index=True)
+    range = Column(String)                       # "7d" | "30d"
+    format = Column(String)                      # "md" | "html" | "pdf" — original requested format
+    source = Column(String)                      # "manual" | "scheduled"
+    summary_line = Column(String, nullable=True) # compact one-liner for history UI
+    content_md = Column(Text)                    # canonical Markdown — HTML/PDF re-rendered on demand
+    delivered = Column(String, nullable=True)    # "ok" | "skipped" | "error: ..." (scheduled only)
+    webhook_url = Column(String, nullable=True)
+    generated_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ReportSchedule(Base):
+    __tablename__ = "report_schedules"
+    __table_args__ = {'extend_existing': True}
+
+    id = Column(Integer, primary_key=True)       # singleton row, id=1
+    enabled = Column(Boolean, default=False, nullable=False)
+    frequency = Column(String, default="weekly") # "weekly" | "monthly"
+    day_of_week = Column(Integer, default=1)     # 0=Mon .. 6=Sun (weekly only)
+    day_of_month = Column(Integer, default=1)    # 1..28 (monthly only)
+    hour = Column(Integer, default=8)            # 0..23 UTC
+    range = Column(String, default="7d")
+    format = Column(String, default="html")
+    webhook_url = Column(String, nullable=True)  # blank → fall back to global WEBHOOK_URL
+    last_sent_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

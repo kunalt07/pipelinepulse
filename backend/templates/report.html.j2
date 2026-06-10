@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PipelinePulse Report — {{ range_label }}</title>
+<style>
+  @page { size: A4; margin: 18mm 14mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: #111827;
+    background: #ffffff;
+    margin: 0;
+    padding: 28px 36px;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  h1, h2, h3 { color: #0f172a; margin-top: 0; }
+  h1 { font-size: 22px; margin-bottom: 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 15px; margin-top: 28px; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid #e5e7eb; text-transform: uppercase; letter-spacing: 0.08em; color: #374151; }
+  h3 { font-size: 13px; margin-top: 16px; margin-bottom: 4px; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+  .meta { color: #6b7280; font-size: 11px; margin-bottom: 18px; }
+  .summary-line { color: #374151; font-size: 12px; margin-bottom: 18px; padding: 10px 14px; background: #f9fafb; border-left: 3px solid #22c55e; border-radius: 3px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #f1f5f9; }
+  th { color: #6b7280; font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; background: #f9fafb; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.mono { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 11px; }
+  .delta-up { color: #16a34a; font-weight: 600; }
+  .delta-down { color: #dc2626; font-weight: 600; }
+  .delta-neutral { color: #9ca3af; }
+  pre { background: #f9fafb; border: 1px solid #e5e7eb; padding: 10px 12px; border-radius: 4px; font-size: 11px; line-height: 1.5; overflow-x: auto; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+  .failure-meta { color: #6b7280; font-size: 11px; margin: 2px 0 6px 0; }
+  .chart { margin: 8px 0 4px 0; max-width: 100%; }
+  .ai-narrative { background: #fef9c3; border-left: 3px solid #eab308; padding: 12px 16px; border-radius: 3px; font-size: 12.5px; color: #422006; margin-bottom: 6px; }
+  footer { margin-top: 32px; padding-top: 14px; border-top: 1px solid #e5e7eb; color: #9ca3af; font-size: 10px; text-align: center; }
+  .empty { color: #9ca3af; font-style: italic; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<h1>PipelinePulse Report</h1>
+<div class="meta">{{ range_label }} · generated {{ data.generated_at }} · window {{ data.window_start }} → {{ data.window_end }}</div>
+
+{% set cur = data.totals.current %}
+{% set prev = data.totals.previous %}
+{% set deltas = data.totals.deltas %}
+
+<div class="summary-line">
+  <strong>{{ cur.total }}</strong> runs ·
+  <strong>{{ cur.success_rate }}%</strong> success ·
+  <strong>{{ cur.failed }}</strong> failure{% if cur.failed != 1 %}s{% endif %}
+</div>
+
+<h2>Executive summary</h2>
+<table>
+  <thead>
+    <tr><th>Metric</th><th class="num">Current</th><th class="num">Prior period</th><th class="num">Change</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Total runs</td>
+      <td class="num">{{ cur.total }}</td>
+      <td class="num">{{ prev.total }}</td>
+      <td class="num">{% if deltas.total is none or deltas.total == 0 %}<span class="delta-neutral">—</span>{% elif deltas.total > 0 %}<span class="delta-up">▲ +{{ deltas.total }}%</span>{% else %}<span class="delta-down">▼ {{ deltas.total }}%</span>{% endif %}</td>
+    </tr>
+    <tr>
+      <td>Failures</td>
+      <td class="num">{{ cur.failed }}</td>
+      <td class="num">{{ prev.failed }}</td>
+      <td class="num">{% if deltas.failed is none or deltas.failed == 0 %}<span class="delta-neutral">—</span>{% elif deltas.failed > 0 %}<span class="delta-down">▲ +{{ deltas.failed }}%</span>{% else %}<span class="delta-up">▼ {{ deltas.failed }}%</span>{% endif %}</td>
+    </tr>
+    <tr>
+      <td>Success rate</td>
+      <td class="num">{{ cur.success_rate }}%</td>
+      <td class="num">{{ prev.success_rate }}%</td>
+      <td class="num">{% if deltas.success_rate == 0 %}<span class="delta-neutral">—</span>{% elif deltas.success_rate > 0 %}<span class="delta-up">▲ +{{ deltas.success_rate }} pts</span>{% else %}<span class="delta-down">▼ {{ deltas.success_rate }} pts</span>{% endif %}</td>
+    </tr>
+    <tr>
+      <td>Avg duration</td>
+      <td class="num">{{ fmt_duration(cur.avg_duration_seconds) }}</td>
+      <td class="num">{{ fmt_duration(prev.avg_duration_seconds) }}</td>
+      <td class="num">{% if deltas.avg_duration_seconds is none or deltas.avg_duration_seconds == 0 %}<span class="delta-neutral">—</span>{% elif deltas.avg_duration_seconds > 0 %}<span class="delta-down">▲ +{{ deltas.avg_duration_seconds }}%</span>{% else %}<span class="delta-up">▼ {{ deltas.avg_duration_seconds }}%</span>{% endif %}</td>
+    </tr>
+    <tr>
+      <td>Total runtime</td>
+      <td class="num">{{ fmt_duration(cur.total_runtime_seconds) }}</td>
+      <td class="num">{{ fmt_duration(prev.total_runtime_seconds) }}</td>
+      <td class="num">{% if deltas.total_runtime_seconds is none or deltas.total_runtime_seconds == 0 %}<span class="delta-neutral">—</span>{% elif deltas.total_runtime_seconds > 0 %}<span class="delta-up">▲ +{{ deltas.total_runtime_seconds }}%</span>{% else %}<span class="delta-down">▼ {{ deltas.total_runtime_seconds }}%</span>{% endif %}</td>
+    </tr>
+  </tbody>
+</table>
+
+{% if data.ai_narrative %}
+<h2>AI narrative</h2>
+<div class="ai-narrative">{{ data.ai_narrative }}</div>
+{% endif %}
+
+<h2>Failure rate trend</h2>
+{% if data.daily %}
+  <div class="chart">{{ failure_trend_svg | safe }}</div>
+{% else %}
+  <p class="empty">No runs in this window.</p>
+{% endif %}
+
+<h2>Per-DAG breakdown</h2>
+{% if data.per_dag %}
+<table>
+  <thead>
+    <tr>
+      <th>DAG</th>
+      <th class="num">Runs</th>
+      <th class="num">Failures</th>
+      <th class="num">Failure rate</th>
+      <th class="num">Avg duration</th>
+      <th class="num">p95</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in data.per_dag %}
+    <tr>
+      <td class="mono">{{ d.dag_id }}</td>
+      <td class="num">{{ d.total_runs }}</td>
+      <td class="num">{{ d.failures }}</td>
+      <td class="num">{% if d.failure_rate > 0 %}<span class="delta-down">{{ d.failure_rate }}%</span>{% else %}{{ d.failure_rate }}%{% endif %}</td>
+      <td class="num">{{ fmt_duration(d.avg_duration_seconds) }}</td>
+      <td class="num">{{ fmt_duration(d.p95_duration_seconds) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No DAG runs in this window.</p>
+{% endif %}
+
+<h2>Busiest hours</h2>
+<div class="chart">{{ busy_hours_svg | safe }}</div>
+
+<h2>Top failures</h2>
+{% if data.top_failures %}
+  {% for f in data.top_failures %}
+    <h3>{{ f.dag_id }}{% if f.started_at %} · {{ f.started_at }}{% endif %}</h3>
+    <div class="failure-meta">
+      Run: <span style="font-family: ui-monospace, monospace;">{{ f.run_id }}</span>
+      {% if f.failed_task %} · Task: <span style="font-family: ui-monospace, monospace;">{{ f.failed_task }}</span>{% endif %}
+      {% if f.duration_seconds is not none %} · {{ fmt_duration(f.duration_seconds) }}{% endif %}
+    </div>
+    {% if f.error_snippet %}
+    <pre>{{ f.error_snippet }}</pre>
+    {% else %}
+    <p class="empty">No error captured.</p>
+    {% endif %}
+  {% endfor %}
+{% else %}
+<p class="empty">No failures in this window. 🎉</p>
+{% endif %}
+
+<footer>
+  Generated by PipelinePulse — github.com/kunalt07/pipelinepulse
+</footer>
+
+</body>
+</html>
