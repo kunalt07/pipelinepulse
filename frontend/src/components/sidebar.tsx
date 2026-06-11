@@ -6,6 +6,7 @@ import { getActiveEnv, type DAG } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { EnvSwitcher } from "@/components/env-switcher";
+import { UserMenu } from "@/components/user-menu";
 
 export type View = "dashboard" | "analytics" | "reports" | "settings";
 
@@ -161,7 +162,10 @@ export function Sidebar({ dags, selected, onSelect, view, onChangeView, onEnvCha
           </span>
           <span className="text-sm font-bold tracking-tight">PipelinePulse</span>
         </div>
-        <ThemeToggle />
+        <div className="flex items-center gap-1">
+          <ThemeToggle />
+          <UserMenu />
+        </div>
       </div>
 
       <div className="border-b border-border px-3 py-2">

@@ -1,15 +1,13 @@
 import os
-import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Response, status
+from fastapi import FastAPI, Depends, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 from database import get_db, engine, run_migrations
-from models import Base, DAGRun, TaskInstance, AIInsight, Notification, DagAlertConfig, ReportRun, ReportSchedule, RunAnnotation, DagSlaConfig, Environment
+from models import Base, DAGRun, TaskInstance, AIInsight, Notification, DagAlertConfig, ReportRun, ReportSchedule, RunAnnotation, DagSlaConfig, Environment, User, UserSession
 import sla as sla_lib
 from notifier import send_failure_alert, webhook_url
 from scheduler import start_scheduler, resync_run
@@ -19,6 +17,11 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from settings import get_gemini_config, get_setting, register_scheduler as register_settings_scheduler
 from environment import env_dep, list_environments, get_env
+from auth import (
+    SESSION_COOKIE_NAME, SESSION_DURATION,
+    hash_password, verify_password,
+    create_session, get_user_from_session, delete_session, current_user, user_count,
+)
 
 load_dotenv()
 
@@ -61,41 +64,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-AUTH_USER = (os.getenv("AUTH_USER") or "").strip()
-AUTH_PASS = (os.getenv("AUTH_PASS") or "").strip()
-AUTH_ENABLED = bool(AUTH_USER and AUTH_PASS)
-
-basic_auth = HTTPBasic(auto_error=False)
+COOKIE_SECURE = (os.getenv("COOKIE_SECURE") or "false").strip().lower() in ("1", "true", "yes")
 
 
-def require_auth(creds: Optional[HTTPBasicCredentials] = Depends(basic_auth)):
-    if not AUTH_ENABLED:
-        return None
-    if not creds:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Auth required",
-            headers={"WWW-Authenticate": 'Basic realm="PipelinePulse"'},
-        )
-    user_ok = secrets.compare_digest(creds.username, AUTH_USER)
-    pass_ok = secrets.compare_digest(creds.password, AUTH_PASS)
-    if not (user_ok and pass_ok):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": 'Basic realm="PipelinePulse"'},
-        )
-    return creds.username
+def require_auth(user: Optional[User] = Depends(current_user)) -> Optional[User]:
+    """Phase A: optional. Returns the User if a valid session cookie is present,
+    else None. The API still accepts unauthenticated requests during this phase
+    so existing curl/script integrations don't break — the web UI is gated by
+    the AuthProvider on the frontend.
+
+    To tighten the gate later, raise 401 here when `user is None`.
+    """
+    return user
+
+
+def _set_session_cookie(response: Response, session_id: str) -> None:
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session_id,
+        max_age=int(SESSION_DURATION.total_seconds()),
+        httponly=True,
+        samesite="lax",
+        secure=COOKIE_SECURE,
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
 
 
 scheduler = start_scheduler()
 register_settings_scheduler(scheduler)
 
 @app.get("/")
-def root():
+def root(db: Session = Depends(get_db)):
     return {
         "status": "PipelinePulse is running",
-        "auth_required": AUTH_ENABLED,
+        "auth_required": user_count(db) > 0,
         "ai_enabled": gemini_enabled(),
         "alerts_enabled": webhook_url() is not None,
     }
@@ -104,6 +110,99 @@ def root():
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+# ---------- Auth ----------
+
+
+class SignupRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=200)
+    name: Optional[str] = Field(default=None, max_length=100)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=1, max_length=200)
+
+
+def _serialize_user(u: User) -> dict:
+    return {
+        "id": u.id,
+        "email": u.email,
+        "name": u.name,
+        "is_admin": u.is_admin,
+        "created_at": str(u.created_at) if u.created_at else None,
+        "last_login_at": str(u.last_login_at) if u.last_login_at else None,
+    }
+
+
+@app.post("/auth/signup")
+def signup(
+    body: SignupRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    email = body.email.strip().lower()
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=400, detail="An account with this email already exists.")
+
+    is_first = user_count(db) == 0
+    user = User(
+        email=email,
+        password_hash=hash_password(body.password),
+        name=(body.name or "").strip() or None,
+        is_admin=is_first,
+        created_at=datetime.utcnow(),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    sid = create_session(db, user, request.headers.get("user-agent"))
+    _set_session_cookie(response, sid)
+    return _serialize_user(user)
+
+
+@app.post("/auth/login")
+def login(
+    body: LoginRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    email = body.email.strip().lower()
+    # Allow login by raw username when the seeded admin used a non-email AUTH_USER.
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        # Backward compat for "AUTH_USER doesn't look like an email" seed path.
+        user = db.query(User).filter(User.email == f"{body.email.strip()}@local").first()
+    if user is None or not verify_password(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    sid = create_session(db, user, request.headers.get("user-agent"))
+    _set_session_cookie(response, sid)
+    return _serialize_user(user)
+
+
+@app.post("/auth/logout")
+def logout(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    sid = request.cookies.get(SESSION_COOKIE_NAME)
+    if sid:
+        delete_session(db, sid)
+    _clear_session_cookie(response)
+    return {"ok": True}
+
+
+@app.get("/auth/me")
+def me(user: Optional[User] = Depends(current_user)):
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not signed in")
+    return _serialize_user(user)
 
 @app.get("/dags")
 def list_dags(env: Environment = Depends(env_dep), _: str = Depends(require_auth)):

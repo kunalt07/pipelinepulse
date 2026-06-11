@@ -69,6 +69,7 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
       AUTH_USER: ${AUTH_USER:-}
       AUTH_PASS: ${AUTH_PASS:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
     ports:
       - "8000:8000"
     depends_on:

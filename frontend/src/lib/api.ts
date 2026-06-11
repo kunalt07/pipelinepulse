@@ -1,13 +1,16 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-const AUTH_USER = process.env.NEXT_PUBLIC_AUTH_USER ?? "";
-const AUTH_PASS = process.env.NEXT_PUBLIC_AUTH_PASS ?? "";
-
-function authHeaders(): Record<string, string> {
-  if (!AUTH_USER || !AUTH_PASS) return {};
-  if (typeof window === "undefined") return {};
-  const token = window.btoa(`${AUTH_USER}:${AUTH_PASS}`);
-  return { Authorization: `Basic ${token}` };
+// Auth is now session-cookie-based. Every request includes credentials so the
+// session cookie set by /auth/login is sent cross-origin from :3000 → :8000.
+// CORS on the backend has allow_credentials=true.
+//
+// 401s are surfaced as `UnauthorizedError`, which the AuthProvider catches and
+// uses to redirect to /login.
+export class UnauthorizedError extends Error {
+  constructor() {
+    super("Not signed in");
+    this.name = "UnauthorizedError";
+  }
 }
 
 // ---------- Active environment ----------
@@ -241,6 +244,15 @@ export type ReportSchedule = {
   global_webhook_configured: boolean;
 };
 
+export type CurrentUser = {
+  id: number;
+  email: string;
+  name: string | null;
+  is_admin: boolean;
+  created_at: string | null;
+  last_login_at: string | null;
+};
+
 export type EnvironmentInfo = {
   id: number;
   name: string;
@@ -309,6 +321,7 @@ function shouldSkipEnv(path: string): boolean {
     return !pure.startsWith("/settings/danger/");
   }
   if (pure === "/health") return true;
+  if (pure.startsWith("/auth/")) return true;
   return false;
 }
 
@@ -318,10 +331,24 @@ function buildUrl(path: string): string {
 }
 
 async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = { ...authHeaders(), ...(init?.headers ?? {}) };
-  const res = await fetch(buildUrl(path), { cache: "no-store", ...init, headers });
-  if (res.status === 401) throw new Error("Unauthorized — check AUTH_USER/AUTH_PASS");
-  if (!res.ok) throw new Error(`${path} → ${res.status}`);
+  const headers = { ...(init?.headers ?? {}) };
+  const res = await fetch(buildUrl(path), {
+    cache: "no-store",
+    credentials: "include",
+    ...init,
+    headers,
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = await res.json();
+      detail = typeof body?.detail === "string" ? body.detail : "";
+    } catch {
+      // ignore — keep generic error
+    }
+    throw new Error(detail || `${path} → ${res.status}`);
+  }
   return res.json();
 }
 
@@ -329,9 +356,14 @@ async function blobFetch(
   path: string,
   init?: RequestInit,
 ): Promise<{ blob: Blob; filename: string | null; reportId: number | null; summary: string | null }> {
-  const headers = { ...authHeaders(), ...(init?.headers ?? {}) };
-  const res = await fetch(buildUrl(path), { cache: "no-store", ...init, headers });
-  if (res.status === 401) throw new Error("Unauthorized — check AUTH_USER/AUTH_PASS");
+  const headers = { ...(init?.headers ?? {}) };
+  const res = await fetch(buildUrl(path), {
+    cache: "no-store",
+    credentials: "include",
+    ...init,
+    headers,
+  });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
   const disposition = res.headers.get("Content-Disposition") ?? "";
   const match = /filename="([^"]+)"/.exec(disposition);
@@ -489,6 +521,22 @@ export const api = {
       `/environments/${id}/test`,
       { method: "POST" },
     ),
+  // Auth — session-cookie-based.
+  authMe: () => jsonFetch<CurrentUser>("/auth/me"),
+  authLogin: (email: string, password: string) =>
+    jsonFetch<CurrentUser>("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    }),
+  authSignup: (email: string, password: string, name?: string) =>
+    jsonFetch<CurrentUser>("/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, name: name || null }),
+    }),
+  authLogout: () =>
+    jsonFetch<{ ok: boolean }>("/auth/logout", { method: "POST" }),
 };
 
 export function downloadBlob(blob: Blob, filename: string) {

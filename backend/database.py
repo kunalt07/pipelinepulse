@@ -137,6 +137,44 @@ def run_migrations():
             except Exception as e:
                 logger.debug(f"migration step skipped: {stmt[:60]}... — {e}")
 
+    # ---------- Auth: seed first user from AUTH_USER/AUTH_PASS if empty ----------
+    _seed_first_user_if_needed()
+
+
+def _seed_first_user_if_needed() -> None:
+    """If no users exist and AUTH_USER/AUTH_PASS env vars are set, create the
+    first user (admin) so existing single-instance deployments keep working
+    after upgrading to session-based auth."""
+    auth_user = (os.getenv("AUTH_USER") or "").strip()
+    auth_pass = (os.getenv("AUTH_PASS") or "").strip()
+    if not (auth_user and auth_pass):
+        return
+    try:
+        # Lazy imports to avoid circular dependencies at module load.
+        from sqlalchemy import text as _text
+        from auth import hash_password
+        from datetime import datetime as _dt
+        with engine.begin() as conn:
+            existing = conn.execute(_text("SELECT COUNT(*) FROM users")).scalar()
+            if existing and int(existing) > 0:
+                return
+            email = auth_user if "@" in auth_user else f"{auth_user}@local"
+            conn.execute(_text("""
+                INSERT INTO users (email, password_hash, name, is_admin, created_at)
+                VALUES (:email, :hash, :name, TRUE, :now)
+            """), {
+                "email": email,
+                "hash": hash_password(auth_pass),
+                "name": auth_user,
+                "now": _dt.utcnow(),
+            })
+        logger.info(
+            f"Seeded first admin user from AUTH_USER/AUTH_PASS env vars "
+            f"(email='{email}'). You can now sign in via the web UI."
+        )
+    except Exception as e:
+        logger.warning(f"_seed_first_user_if_needed failed: {e}")
+
 
 def _ensure_default_env() -> int | None:
     """Create the 'default' environment from AIRFLOW_* env vars if no env rows exist.
