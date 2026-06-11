@@ -99,8 +99,21 @@ export type AlertConfig = {
 };
 
 export type RunDiff = {
-  baseline: { run_id: string; start_date: string; duration_seconds: number | null } | null;
-  current?: { run_id: string; state: string; duration_seconds: number | null };
+  baseline: {
+    dag_id: string;
+    run_id: string;
+    state: string;
+    start_date: string;
+    duration_seconds: number | null;
+  } | null;
+  baseline_kind?: "last_success" | "explicit";
+  current?: {
+    dag_id: string;
+    run_id: string;
+    state: string;
+    start_date: string | null;
+    duration_seconds: number | null;
+  };
   duration_delta_seconds: number | null;
   task_changes: Array<{
     task_id: string;
@@ -240,8 +253,18 @@ export const api = {
       `/dags/${dagId}/trigger`,
       { method: "POST" },
     ),
-  runDiff: (dagId: string, runId: string) =>
-    jsonFetch<RunDiff>(`/runs/${dagId}/${encodeURIComponent(runId)}/diff`),
+  runDiff: (
+    dagId: string,
+    runId: string,
+    baseline?: { dagId: string; runId: string },
+  ) => {
+    const qs = baseline
+      ? `?baseline_dag_id=${encodeURIComponent(baseline.dagId)}&baseline_run_id=${encodeURIComponent(baseline.runId)}`
+      : "";
+    return jsonFetch<RunDiff>(
+      `/runs/${dagId}/${encodeURIComponent(runId)}/diff${qs}`,
+    );
+  },
   analytics: (range: "7d" | "30d" = "7d") =>
     jsonFetch<AnalyticsResponse>(`/analytics?range=${range}`),
   alertConfigs: () =>

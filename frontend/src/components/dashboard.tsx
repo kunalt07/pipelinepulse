@@ -461,18 +461,17 @@ export function Dashboard() {
                         </div>
                       )}
 
-                      {selectedRun &&
-                        runs.find((r) => r.run_id === selectedRun)?.state === "failed" && (
-                          <div className="border-t border-border pt-4">
-                            <div className="mb-3">
-                              <h4 className="text-sm font-medium">What changed?</h4>
-                              <p className="text-xs font-medium text-muted-foreground">
-                                Diff against last successful run
-                              </p>
-                            </div>
-                            <DiffPanel dagId={selected} runId={selectedRun} />
+                      {selectedRun && selected && (
+                        <div className="border-t border-border pt-4">
+                          <div className="mb-3">
+                            <h4 className="text-sm font-medium">What changed?</h4>
+                            <p className="text-xs font-medium text-muted-foreground">
+                              Pick any baseline to compare task-by-task.
+                            </p>
                           </div>
-                        )}
+                          <DiffPanel dagId={selected} runId={selectedRun} />
+                        </div>
+                      )}
                     </CardContent>
                   </Card>
                 </motion.div>

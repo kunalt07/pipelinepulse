@@ -284,32 +284,62 @@ def resync(dag_id: str, run_id: str, _: str = Depends(require_auth)):
 
 
 @app.get("/runs/{dag_id}/{run_id}/diff")
-def run_diff(dag_id: str, run_id: str, db: Session = Depends(get_db), _: str = Depends(require_auth)):
-    """Compare a run's tasks against the last successful run of the same DAG."""
+def run_diff(
+    dag_id: str,
+    run_id: str,
+    baseline_dag_id: Optional[str] = None,
+    baseline_run_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Compare two runs' tasks.
+
+    Default: current run vs the last successful run of the same DAG (preserved behavior).
+    Override: pass `baseline_dag_id` + `baseline_run_id` to pick any other run as the baseline.
+    The two halves can come from different DAGs — task overlap is by task_id.
+    """
     current = db.query(DAGRun).filter(DAGRun.dag_id == dag_id, DAGRun.run_id == run_id).first()
     if not current:
         raise HTTPException(status_code=404, detail="run not found")
 
-    baseline_q = db.query(DAGRun).filter(
-        DAGRun.dag_id == dag_id,
-        DAGRun.state == "success",
-        DAGRun.run_id != run_id,
-    )
-    if current.start_date:
-        baseline_q = baseline_q.filter(
-            DAGRun.start_date.isnot(None),
-            DAGRun.start_date < current.start_date,
+    explicit_baseline = bool(baseline_dag_id and baseline_run_id)
+    if explicit_baseline:
+        baseline = db.query(DAGRun).filter(
+            DAGRun.dag_id == baseline_dag_id,
+            DAGRun.run_id == baseline_run_id,
+        ).first()
+        if not baseline:
+            raise HTTPException(status_code=404, detail="baseline run not found")
+        baseline_kind = "explicit"
+    else:
+        baseline_q = db.query(DAGRun).filter(
+            DAGRun.dag_id == dag_id,
+            DAGRun.state == "success",
+            DAGRun.run_id != run_id,
         )
-    baseline = baseline_q.order_by(DAGRun.start_date.desc().nullslast()).first()
+        if current.start_date:
+            baseline_q = baseline_q.filter(
+                DAGRun.start_date.isnot(None),
+                DAGRun.start_date < current.start_date,
+            )
+        baseline = baseline_q.order_by(DAGRun.start_date.desc().nullslast()).first()
+        baseline_kind = "last_success"
+
     if not baseline:
-        return {"baseline": None, "task_changes": [], "added_tasks": [], "removed_tasks": [],
-                "duration_delta_seconds": None}
+        return {
+            "baseline": None,
+            "baseline_kind": baseline_kind,
+            "task_changes": [],
+            "added_tasks": [],
+            "removed_tasks": [],
+            "duration_delta_seconds": None,
+        }
 
     cur_tasks = {t.task_id: t for t in db.query(TaskInstance).filter(
         TaskInstance.dag_id == dag_id, TaskInstance.run_id == run_id
     ).all()}
     base_tasks = {t.task_id: t for t in db.query(TaskInstance).filter(
-        TaskInstance.dag_id == dag_id, TaskInstance.run_id == baseline.run_id
+        TaskInstance.dag_id == baseline.dag_id, TaskInstance.run_id == baseline.run_id
     ).all()}
 
     task_changes = []
@@ -346,13 +376,18 @@ def run_diff(dag_id: str, run_id: str, db: Session = Depends(get_db), _: str = D
 
     return {
         "baseline": {
+            "dag_id": baseline.dag_id,
             "run_id": baseline.run_id,
+            "state": baseline.state,
             "start_date": str(baseline.start_date),
             "duration_seconds": baseline.duration_seconds,
         },
+        "baseline_kind": baseline_kind,
         "current": {
+            "dag_id": current.dag_id,
             "run_id": current.run_id,
             "state": current.state,
+            "start_date": str(current.start_date) if current.start_date else None,
             "duration_seconds": current.duration_seconds,
         },
         "duration_delta_seconds": duration_delta,
