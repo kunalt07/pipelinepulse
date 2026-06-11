@@ -474,7 +474,6 @@ export function Dashboard() {
                       {selectedRun && selected && (
                         <div className="border-t border-border pt-4">
                           <AnnotationPanel
-                            key={`${selected}/${selectedRun}`}
                             dagId={selected}
                             runId={selectedRun}
                             onChange={onAnnotationChange(selectedRun)}

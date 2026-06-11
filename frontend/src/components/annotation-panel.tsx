@@ -46,7 +46,11 @@ export function AnnotationPanel({ dagId, runId, onChange }: Props) {
       cancelled = true;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [dagId, runId, onChange]);
+    // onChange is intentionally excluded — including it re-fires the fetch on every
+    // parent re-render and overwrites mid-typing edits. We only want to reload when
+    // the (dagId, runId) target changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dagId, runId]);
 
   const persist = (next: string) => {
     setNote(next);
