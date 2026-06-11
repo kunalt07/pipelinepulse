@@ -84,6 +84,20 @@ class ReportRun(Base):
     generated_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+class DagSlaConfig(Base):
+    __tablename__ = "dag_sla_configs"
+    __table_args__ = {'extend_existing': True}
+
+    dag_id = Column(String, primary_key=True)
+    enabled = Column(Boolean, default=True, nullable=False)
+    # Daily wall-clock deadline. Both null = no deadline check.
+    deadline_time = Column(String, nullable=True)        # "HH:MM"
+    deadline_timezone = Column(String, nullable=True)    # IANA tz, e.g. "UTC"
+    # Per-run max runtime (seconds). Null = no runtime check.
+    max_runtime_seconds = Column(Integer, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class RunAnnotation(Base):
     __tablename__ = "run_annotations"
     __table_args__ = {'extend_existing': True}

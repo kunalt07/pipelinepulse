@@ -1,9 +1,10 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
 from database import SessionLocal
-from models import DAGRun, TaskInstance, Notification, DagAlertConfig, ReportRun, ReportSchedule
+from models import DAGRun, TaskInstance, Notification, DagAlertConfig, ReportRun, ReportSchedule, DagSlaConfig
 from airflow_client import get_dags, get_dag_runs, get_task_instances, get_task_logs
-from notifier import send_failure_alert, send_report_notification, webhook_url
+from notifier import send_failure_alert, send_report_notification, send_sla_alert, webhook_url
+import sla as sla_lib
 from datetime import datetime, time, timedelta, timezone
 import logging
 
@@ -291,6 +292,78 @@ def resync_run(dag_id: str, run_id: str) -> dict:
         db.close()
 
 
+def _check_sla_breaches():
+    """Scan recent terminal runs for SLA breaches, fire one webhook per (run, kind)."""
+    db = SessionLocal()
+    try:
+        configs = {c.dag_id: c for c in db.query(DagSlaConfig).filter(DagSlaConfig.enabled.is_(True)).all()}
+        if not configs:
+            return
+
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=2)
+        runs = (
+            db.query(DAGRun)
+            .filter(
+                DAGRun.dag_id.in_(list(configs.keys())),
+                DAGRun.start_date.isnot(None),
+                DAGRun.start_date >= cutoff,
+                DAGRun.state.in_(("success", "failed")),
+            )
+            .all()
+        )
+        if not runs:
+            return
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        for run in runs:
+            cfg = configs.get(run.dag_id)
+            breach = sla_lib.evaluate_run(run, cfg, now)
+            if breach is None:
+                continue
+
+            event = f"sla_{breach.kind}"  # "sla_deadline_missed" | "sla_max_runtime"
+
+            # Dedup: skip if we already sent this exact event for this run successfully
+            already = db.query(Notification).filter(
+                Notification.dag_id == run.dag_id,
+                Notification.run_id == run.run_id,
+                Notification.event == event,
+                Notification.delivered == "ok",
+            ).first()
+            if already:
+                continue
+
+            # Honor existing per-DAG alert config (mute / quiet hours / threshold)
+            alert_cfg = db.query(DagAlertConfig).filter(DagAlertConfig.dag_id == run.dag_id).first()
+            suppressed_reason = None
+            if alert_cfg is not None:
+                if alert_cfg.muted:
+                    suppressed_reason = "muted"
+                elif _in_quiet_hours(alert_cfg):
+                    suppressed_reason = "quiet_hours"
+
+            if suppressed_reason:
+                db.add(Notification(
+                    dag_id=run.dag_id, run_id=run.run_id, event=event,
+                    delivered=f"suppressed:{suppressed_reason}", webhook_url=webhook_url() or "",
+                ))
+                continue
+
+            delivered = send_sla_alert(run.dag_id, run.run_id, breach.kind, breach.message)
+            db.add(Notification(
+                dag_id=run.dag_id, run_id=run.run_id, event=event,
+                delivered=delivered, webhook_url=webhook_url() or "",
+            ))
+            logger.info(f"SLA alert {event} for {run.dag_id}/{run.run_id}: {delivered}")
+
+        db.commit()
+    except Exception as e:
+        logger.error(f"SLA check failed: {e}", exc_info=True)
+        db.rollback()
+    finally:
+        db.close()
+
+
 def _is_schedule_due(s: ReportSchedule, now: datetime) -> bool:
     """Returns True if the schedule should fire in the current 15-min check window."""
     if not s.enabled:
@@ -385,6 +458,13 @@ def start_scheduler():
         "interval",
         minutes=15,
         id="maybe_generate_scheduled_report",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _check_sla_breaches,
+        "interval",
+        minutes=2,
+        id="check_sla_breaches",
         replace_existing=True,
     )
     scheduler.start()

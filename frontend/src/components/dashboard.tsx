@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Inbox, Play, RefreshCw, StickyNote } from "lucide-react";
-import { api, type DAG, type DAGRun, type StuckRun, type Summary } from "@/lib/api";
+import { Clock, Inbox, Play, RefreshCw, StickyNote } from "lucide-react";
+import { api, type DAG, type DAGRun, type SlaAtRisk, type SlaBreach, type StuckRun, type Summary } from "@/lib/api";
 import { formatDuration, formatRelativeTime } from "@/lib/utils";
 import { Sidebar, type View } from "@/components/sidebar";
 import { AnalyticsView } from "@/components/analytics-view";
@@ -23,6 +23,8 @@ import { AnnotationPanel } from "@/components/annotation-panel";
 import { HealthStrip } from "@/components/health-strip";
 import { EmptyState } from "@/components/empty-state";
 import { AlertConfigPanel } from "@/components/alert-config-panel";
+import { SlaConfigPanel } from "@/components/sla-config-panel";
+import { SlaAtRiskBanner } from "@/components/sla-at-risk-banner";
 
 const cardEntry = {
   initial: { opacity: 0, y: 10 },
@@ -45,19 +47,25 @@ export function Dashboard() {
   const [triggerMsg, setTriggerMsg] = useState<string | null>(null);
   const [view, setView] = useState<View>("dashboard");
   const [annotated, setAnnotated] = useState<Set<string>>(new Set());
+  const [atRisk, setAtRisk] = useState<SlaAtRisk[]>([]);
+  const [slaBreaches, setSlaBreaches] = useState<Map<string, SlaBreach>>(new Map());
 
   const PAGE_SIZE = 10;
 
   const loadGlobal = async () => {
     try {
-      const [s, d, st] = await Promise.all([
+      const [s, d, st, ar, br] = await Promise.all([
         api.summary(),
         api.dags(),
         api.stuckRuns().catch(() => []),
+        api.slaAtRisk().catch(() => []),
+        api.slaBreaches("30d").catch(() => []),
       ]);
       setSummary(s);
       setDags(d);
       setStuck(st);
+      setAtRisk(ar);
+      setSlaBreaches(new Map(br.map((b) => [`${b.dag_id}/${b.run_id}`, b])));
       if (!selected && d.length > 0) setSelected(d[0].dag_id);
       setLoadError(null);
     } catch (e) {
@@ -255,6 +263,8 @@ export function Dashboard() {
         </header>
 
         <div className="space-y-6 p-6">
+          <SlaAtRiskBanner items={atRisk} onSelect={(d) => setSelected(d)} />
+
           <StuckRunsBanner
             stuck={stuck}
             onSelect={(dagId, runId) => {
@@ -377,6 +387,17 @@ export function Dashboard() {
                                       className="h-3 w-3 text-amber-500"
                                       aria-label="Has annotation"
                                     />
+                                  )}
+                                  {selected && slaBreaches.get(`${selected}/${r.run_id}`) && (
+                                    <span
+                                      title={`SLA: ${slaBreaches.get(`${selected}/${r.run_id}`)?.message}`}
+                                      className="inline-flex"
+                                    >
+                                      <Clock
+                                        className="h-3 w-3 text-danger"
+                                        aria-label="SLA breach"
+                                      />
+                                    </span>
                                   )}
                                 </span>
                               </td>
@@ -513,6 +534,21 @@ export function Dashboard() {
                   </CardHeader>
                   <CardContent className="p-0">
                     <AlertConfigPanel />
+                  </CardContent>
+                </Card>
+              </motion.div>
+
+              <motion.div {...cardEntry} transition={{ ...cardEntry.transition, delay: 0.29 }}>
+                <Card>
+                  <CardHeader>
+                    <CardTitle>SLA config</CardTitle>
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Daily wall-clock deadline + max runtime per DAG. Breaches reuse failure
+                      alerts and respect mute/quiet hours.
+                    </p>
+                  </CardHeader>
+                  <CardContent className="p-0">
+                    <SlaConfigPanel />
                   </CardContent>
                 </Card>
               </motion.div>

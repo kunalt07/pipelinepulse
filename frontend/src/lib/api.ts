@@ -89,6 +89,24 @@ export type AnalyticsResponse = {
   busy_hours: Array<{ hour: number; total: number; failed: number }>;
 };
 
+export type SlaConfig = {
+  dag_id: string;
+  enabled: boolean;
+  deadline_time: string | null;       // "HH:MM"
+  deadline_timezone: string | null;   // IANA tz
+  max_runtime_minutes: number | null;
+};
+
+export type SlaBreach = {
+  dag_id: string;
+  run_id: string;
+  start_date: string;
+  kind: "deadline_missed" | "max_runtime";
+  message: string;
+};
+
+export type SlaAtRisk = { dag_id: string; reason: string };
+
 export type AlertConfig = {
   dag_id: string;
   muted: boolean;
@@ -275,6 +293,18 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  slaConfigs: () =>
+    jsonFetch<{ configs: SlaConfig[] }>("/sla/configs").then((r) => r.configs),
+  updateSlaConfig: (dagId: string, body: Omit<SlaConfig, "dag_id">) =>
+    jsonFetch<SlaConfig>(`/sla/configs/${dagId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  slaAtRisk: () =>
+    jsonFetch<{ at_risk: SlaAtRisk[] }>("/sla/at-risk").then((r) => r.at_risk),
+  slaBreaches: (range: "24h" | "7d" | "30d" = "7d") =>
+    jsonFetch<{ breaches: SlaBreach[] }>(`/sla/breaches?range=${range}`).then((r) => r.breaches),
   explain: (dagId: string, runId: string) =>
     jsonFetch<{ insight: string }>(
       `/ai/explain/${dagId}/${encodeURIComponent(runId)}`,

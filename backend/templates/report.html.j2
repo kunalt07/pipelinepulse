@@ -137,6 +137,34 @@
 <h2>Busiest hours</h2>
 <div class="chart">{{ busy_hours_svg | safe }}</div>
 
+{% if data.sla_summary %}
+<h2>SLA performance</h2>
+<table>
+  <thead>
+    <tr>
+      <th>DAG</th>
+      <th class="num">Runs</th>
+      <th class="num">Breaches</th>
+      <th class="num">Deadline misses</th>
+      <th class="num">Runtime breaches</th>
+      <th class="num">Compliance</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in data.sla_summary %}
+    <tr>
+      <td class="mono">{{ s.dag_id }}</td>
+      <td class="num">{{ s.total_runs }}</td>
+      <td class="num">{% if s.breaches > 0 %}<span class="delta-down">{{ s.breaches }}</span>{% else %}{{ s.breaches }}{% endif %}</td>
+      <td class="num">{{ s.deadline_misses }}</td>
+      <td class="num">{{ s.runtime_breaches }}</td>
+      <td class="num">{% if s.compliance_rate < 100 %}<span class="delta-down">{{ s.compliance_rate }}%</span>{% else %}<span class="delta-up">{{ s.compliance_rate }}%</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <h2>Top failures</h2>
 {% if data.top_failures %}
   {% for f in data.top_failures %}

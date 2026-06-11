@@ -13,7 +13,8 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from models import DAGRun, TaskInstance, RunAnnotation
+from models import DAGRun, TaskInstance, RunAnnotation, DagSlaConfig
+import sla as sla_lib
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,40 @@ def gather_report_data(db: Session, range_: str) -> dict:
             "note": annotation.note if annotation else None,
         })
 
+    # SLA performance — per-DAG hits/misses for the window
+    sla_summary = []
+    sla_configs = {c.dag_id: c for c in db.query(DagSlaConfig).filter(DagSlaConfig.enabled.is_(True)).all()}
+    if sla_configs:
+        # Re-bucket runs by dag for SLA evaluation
+        runs_by_dag: dict[str, list] = {}
+        for r in current_runs:
+            if r.state in ("success", "failed"):
+                runs_by_dag.setdefault(r.dag_id, []).append(r)
+        for dag_id, cfg in sla_configs.items():
+            runs_for_dag = runs_by_dag.get(dag_id, [])
+            total = len(runs_for_dag)
+            if total == 0:
+                continue
+            breaches = 0
+            kinds = {"deadline_missed": 0, "max_runtime": 0}
+            for r in runs_for_dag:
+                breach = sla_lib.evaluate_run(r, cfg, now)
+                if breach is not None:
+                    breaches += 1
+                    kinds[breach.kind] = kinds.get(breach.kind, 0) + 1
+            sla_summary.append({
+                "dag_id": dag_id,
+                "total_runs": total,
+                "breaches": breaches,
+                "deadline_misses": kinds["deadline_missed"],
+                "runtime_breaches": kinds["max_runtime"],
+                "compliance_rate": round((1 - breaches / total) * 100, 1) if total else 100.0,
+                "deadline_time": cfg.deadline_time,
+                "deadline_timezone": cfg.deadline_timezone,
+                "max_runtime_minutes": int(cfg.max_runtime_seconds / 60) if cfg.max_runtime_seconds else None,
+            })
+    sla_summary.sort(key=lambda x: (-x["breaches"], x["dag_id"]))
+
     return {
         "range": range_,
         "generated_at": now.isoformat(sep=" ", timespec="seconds") + " UTC",
@@ -201,6 +236,7 @@ def gather_report_data(db: Session, range_: str) -> dict:
         "slowest_dags": slowest,
         "most_failures": most_failures,
         "top_failures": top_failures,
+        "sla_summary": sla_summary,
         "busy_hours": by_hour,
         "ai_narrative": None,  # filled in by caller if Gemini is enabled
     }
@@ -283,6 +319,19 @@ def render_markdown(data: dict) -> str:
     else:
         lines.append("_No DAG runs in this window._")
     lines.append("")
+
+    # SLA performance
+    if data.get("sla_summary"):
+        lines.append("## SLA performance")
+        lines.append("")
+        lines.append("| DAG | Runs | Breaches | Deadline misses | Runtime breaches | Compliance |")
+        lines.append("|---|---:|---:|---:|---:|---:|")
+        for s in data["sla_summary"]:
+            lines.append(
+                f"| `{s['dag_id']}` | {s['total_runs']} | {s['breaches']} | "
+                f"{s['deadline_misses']} | {s['runtime_breaches']} | {s['compliance_rate']}% |"
+            )
+        lines.append("")
 
     # Top failures
     lines.append("## Top failures")

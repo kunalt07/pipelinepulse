@@ -82,6 +82,37 @@ def build_report_payload(report_id: int, range_label: str, summary_line: str) ->
     return {"text": "\n".join(lines)}
 
 
+def build_sla_payload(dag_id: str, run_id: str, kind: str, message: str) -> dict:
+    when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    icon = "⏰" if kind == "deadline_missed" else "🕒"
+    title = "SLA deadline missed" if kind == "deadline_missed" else "SLA runtime exceeded"
+    lines = [
+        f":{icon}: *{title}* — `{dag_id}`",
+        f"Run: `{run_id}`",
+        f"Time: {when}",
+        f"Detail: {message}",
+    ]
+    link = airflow_run_url(dag_id, run_id)
+    if link:
+        lines.append(f"<{link}|Open in Airflow>")
+    return {"text": "\n".join(lines)}
+
+
+def send_sla_alert(dag_id: str, run_id: str, kind: str, message: str) -> str:
+    url = webhook_url()
+    if not url:
+        return "skipped"
+    payload = build_sla_payload(dag_id, run_id, kind, message)
+    try:
+        r = requests.post(url, json=payload, timeout=8)
+        if r.status_code >= 300:
+            return f"error: HTTP {r.status_code}"
+        return "ok"
+    except Exception as e:
+        logger.warning(f"SLA webhook delivery failed: {e}")
+        return f"error: {e}"
+
+
 def send_report_notification(
     report_id: int,
     range_label: str,

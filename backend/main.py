@@ -9,7 +9,8 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from database import get_db, engine, run_migrations
-from models import Base, DAGRun, TaskInstance, AIInsight, Notification, DagAlertConfig, ReportRun, ReportSchedule, RunAnnotation
+from models import Base, DAGRun, TaskInstance, AIInsight, Notification, DagAlertConfig, ReportRun, ReportSchedule, RunAnnotation, DagSlaConfig
+import sla as sla_lib
 from notifier import send_failure_alert, webhook_url
 from scheduler import start_scheduler, resync_run
 from airflow_client import get_task_logs, trigger_dag_run
@@ -276,6 +277,142 @@ def upsert_alert_config(
     db.commit()
     db.refresh(cfg)
     return _serialize_config(cfg, dag_id)
+
+
+class SlaConfigUpdate(BaseModel):
+    enabled: bool = True
+    deadline_time: Optional[str] = None     # "HH:MM" or null
+    deadline_timezone: Optional[str] = None
+    max_runtime_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+
+
+def _serialize_sla(cfg: Optional[DagSlaConfig], dag_id: str) -> dict:
+    if cfg is None:
+        return {
+            "dag_id": dag_id,
+            "enabled": False,
+            "deadline_time": None,
+            "deadline_timezone": None,
+            "max_runtime_minutes": None,
+        }
+    return {
+        "dag_id": cfg.dag_id,
+        "enabled": cfg.enabled,
+        "deadline_time": cfg.deadline_time,
+        "deadline_timezone": cfg.deadline_timezone,
+        "max_runtime_minutes": (
+            int(cfg.max_runtime_seconds / 60) if cfg.max_runtime_seconds else None
+        ),
+    }
+
+
+@app.get("/sla/configs")
+def list_sla_configs(db: Session = Depends(get_db), _: str = Depends(require_auth)):
+    """One row per known DAG; missing rows yield disabled defaults."""
+    from airflow_client import get_dags as _get_dags
+    try:
+        dag_ids = [d["dag_id"] for d in _get_dags()]
+    except Exception:
+        dag_ids = []
+    existing = {c.dag_id: c for c in db.query(DagSlaConfig).all()}
+    for dag_id in existing.keys():
+        if dag_id not in dag_ids:
+            dag_ids.append(dag_id)
+    return {"configs": [_serialize_sla(existing.get(d), d) for d in sorted(dag_ids)]}
+
+
+@app.put("/sla/configs/{dag_id}")
+def upsert_sla_config(
+    dag_id: str,
+    body: SlaConfigUpdate,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    if body.deadline_time:
+        try:
+            h, m = body.deadline_time.split(":")
+            if not (0 <= int(h) < 24 and 0 <= int(m) < 60):
+                raise ValueError
+        except Exception:
+            raise HTTPException(status_code=400, detail="deadline_time must be HH:MM")
+
+    cfg = db.query(DagSlaConfig).filter(DagSlaConfig.dag_id == dag_id).first()
+    if cfg is None:
+        cfg = DagSlaConfig(dag_id=dag_id)
+        db.add(cfg)
+    cfg.enabled = body.enabled
+    cfg.deadline_time = body.deadline_time or None
+    cfg.deadline_timezone = (body.deadline_timezone or None) if body.deadline_time else None
+    cfg.max_runtime_seconds = (body.max_runtime_minutes * 60) if body.max_runtime_minutes else None
+    db.commit()
+    db.refresh(cfg)
+    return _serialize_sla(cfg, dag_id)
+
+
+@app.get("/sla/at-risk")
+def sla_at_risk(db: Session = Depends(get_db), _: str = Depends(require_auth)):
+    """DAGs whose deadline is within 60 min and don't have a success yet."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    configs = db.query(DagSlaConfig).filter(DagSlaConfig.enabled.is_(True)).all()
+    at_risk = []
+    for cfg in configs:
+        if not cfg.deadline_time:
+            continue
+        last_run = (
+            db.query(DAGRun)
+            .filter(DAGRun.dag_id == cfg.dag_id, DAGRun.start_date.isnot(None))
+            .order_by(DAGRun.start_date.desc())
+            .first()
+        )
+        reason = sla_lib.at_risk(cfg, last_run, now)
+        if reason:
+            at_risk.append({"dag_id": cfg.dag_id, "reason": reason})
+    return {"at_risk": at_risk}
+
+
+@app.get("/sla/breaches")
+def sla_breaches(
+    range: str = "7d",
+    db: Session = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """All runs in the window that breached SLA. Used for table badges + reports."""
+    if range not in {"24h", "7d", "30d"}:
+        raise HTTPException(status_code=400, detail="range must be 24h | 7d | 30d")
+    hours = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}[range]
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    configs = {c.dag_id: c for c in db.query(DagSlaConfig).filter(DagSlaConfig.enabled.is_(True)).all()}
+    if not configs:
+        return {"breaches": []}
+
+    runs = (
+        db.query(DAGRun)
+        .filter(
+            DAGRun.dag_id.in_(list(configs.keys())),
+            DAGRun.start_date.isnot(None),
+            DAGRun.start_date >= cutoff,
+            DAGRun.state.in_(("success", "failed")),
+        )
+        .order_by(DAGRun.start_date.desc())
+        .all()
+    )
+
+    breaches = []
+    for r in runs:
+        cfg = configs.get(r.dag_id)
+        breach = sla_lib.evaluate_run(r, cfg, now)
+        if breach is None:
+            continue
+        breaches.append({
+            "dag_id": r.dag_id,
+            "run_id": r.run_id,
+            "start_date": str(r.start_date),
+            "kind": breach.kind,
+            "message": breach.message,
+        })
+    return {"breaches": breaches}
 
 
 @app.post("/runs/{dag_id}/{run_id}/resync")
