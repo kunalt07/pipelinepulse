@@ -41,7 +41,9 @@
 <body>
 
 <h1>PipelinePulse Report</h1>
-<div class="meta">{{ range_label }} · generated {{ data.generated_at }} · window {{ data.window_start }} → {{ data.window_end }}</div>
+<div class="meta">
+  {% if data.environment %}<strong>Environment:</strong> {{ data.environment }} · {% endif %}{{ range_label }} · generated {{ data.generated_at }} · window {{ data.window_start }} → {{ data.window_end }}
+</div>
 
 {% set cur = data.totals.current %}
 {% set prev = data.totals.previous %}

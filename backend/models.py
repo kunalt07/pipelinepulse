@@ -1,25 +1,56 @@
-from sqlalchemy import Boolean, Column, String, DateTime, Float, Integer, Text
+from sqlalchemy import (
+    Boolean, Column, ForeignKey, Index, Integer, String, DateTime, Float, Text,
+    UniqueConstraint,
+)
 from database import Base
 from datetime import datetime
 
-class DAGRun(Base):
-    __tablename__ = "dag_runs"
+
+class Environment(Base):
+    __tablename__ = "environments"
     __table_args__ = {'extend_existing': True}
 
     id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, nullable=False, index=True)
+    airflow_base_url = Column(String, nullable=False)
+    airflow_username = Column(String, nullable=True)
+    airflow_password = Column(String, nullable=True)   # plaintext (self-hosted trade-off)
+    airflow_public_url = Column(String, nullable=True) # webhook deep-links; falls back to base_url
+    is_default = Column(Boolean, default=False, nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class DAGRun(Base):
+    __tablename__ = "dag_runs"
+    __table_args__ = (
+        UniqueConstraint("environment_id", "run_id", name="uq_dag_runs_env_run"),
+        Index("ix_dag_runs_env_dag", "environment_id", "dag_id"),
+        {'extend_existing': True},
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    environment_id = Column(Integer, ForeignKey("environments.id"), nullable=False, index=True)
     dag_id = Column(String, index=True)
-    run_id = Column(String, unique=True, index=True)
+    run_id = Column(String, index=True)   # NOT unique alone — globally unique with environment_id
     state = Column(String)
     start_date = Column(DateTime, nullable=True)
     end_date = Column(DateTime, nullable=True)
     duration_seconds = Column(Float, nullable=True)
     synced_at = Column(DateTime, default=datetime.utcnow)
 
+
 class TaskInstance(Base):
     __tablename__ = "task_instances"
-    __table_args__ = {'extend_existing': True}
+    __table_args__ = (
+        Index("ix_task_instances_env_run", "environment_id", "run_id"),
+        Index("ix_task_instances_env_dag", "environment_id", "dag_id"),
+        {'extend_existing': True},
+    )
 
     id = Column(Integer, primary_key=True, index=True)
+    environment_id = Column(Integer, ForeignKey("environments.id"), nullable=False, index=True)
     dag_id = Column(String, index=True)
     run_id = Column(String, index=True)
     task_id = Column(String)
@@ -31,11 +62,13 @@ class TaskInstance(Base):
     error_message = Column(Text, nullable=True)
     synced_at = Column(DateTime, default=datetime.utcnow)
 
+
 class AIInsight(Base):
     __tablename__ = "ai_insights"
     __table_args__ = {'extend_existing': True}
 
     id = Column(Integer, primary_key=True, index=True)
+    environment_id = Column(Integer, ForeignKey("environments.id"), nullable=False, index=True)
     dag_id = Column(String, index=True)
     run_id = Column(String, index=True)
     insight_type = Column(String)
@@ -48,10 +81,11 @@ class Notification(Base):
     __table_args__ = {'extend_existing': True}
 
     id = Column(Integer, primary_key=True, index=True)
+    environment_id = Column(Integer, ForeignKey("environments.id"), nullable=False, index=True)
     dag_id = Column(String, index=True)
     run_id = Column(String, index=True)
-    event = Column(String)            # e.g. "run_failed"
-    delivered = Column(String)        # "ok" | "skipped" | "error: <reason>"
+    event = Column(String)            # e.g. "run_failed", "sla_deadline_missed"
+    delivered = Column(String)        # "ok" | "skipped" | "error: <reason>" | "suppressed:<reason>"
     webhook_url = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
@@ -60,6 +94,8 @@ class DagAlertConfig(Base):
     __tablename__ = "dag_alert_configs"
     __table_args__ = {'extend_existing': True}
 
+    # Composite PK: alert config is per-(env, dag).
+    environment_id = Column(Integer, ForeignKey("environments.id"), primary_key=True)
     dag_id = Column(String, primary_key=True)
     muted = Column(Boolean, default=False, nullable=False)
     min_consecutive_failures = Column(Integer, default=1, nullable=False)
@@ -74,6 +110,7 @@ class ReportRun(Base):
     __table_args__ = {'extend_existing': True}
 
     id = Column(Integer, primary_key=True, index=True)
+    environment_id = Column(Integer, ForeignKey("environments.id"), nullable=False, index=True)
     range = Column(String)                       # "7d" | "30d"
     format = Column(String)                      # "md" | "html" | "pdf" — original requested format
     source = Column(String)                      # "manual" | "scheduled"
@@ -88,6 +125,7 @@ class DagSlaConfig(Base):
     __tablename__ = "dag_sla_configs"
     __table_args__ = {'extend_existing': True}
 
+    environment_id = Column(Integer, ForeignKey("environments.id"), primary_key=True)
     dag_id = Column(String, primary_key=True)
     enabled = Column(Boolean, default=True, nullable=False)
     # Daily wall-clock deadline. Both null = no deadline check.
@@ -102,6 +140,7 @@ class RunAnnotation(Base):
     __tablename__ = "run_annotations"
     __table_args__ = {'extend_existing': True}
 
+    environment_id = Column(Integer, ForeignKey("environments.id"), primary_key=True)
     dag_id = Column(String, primary_key=True)
     run_id = Column(String, primary_key=True)
     note = Column(Text, nullable=False)
@@ -119,9 +158,13 @@ class Setting(Base):
 
 class ReportSchedule(Base):
     __tablename__ = "report_schedules"
-    __table_args__ = {'extend_existing': True}
+    __table_args__ = (
+        UniqueConstraint("environment_id", name="uq_report_schedules_env"),
+        {'extend_existing': True},
+    )
 
-    id = Column(Integer, primary_key=True)       # singleton row, id=1
+    id = Column(Integer, primary_key=True)       # one row per env (was: singleton id=1)
+    environment_id = Column(Integer, ForeignKey("environments.id"), nullable=False, index=True)
     enabled = Column(Boolean, default=False, nullable=False)
     frequency = Column(String, default="weekly") # "weekly" | "monthly"
     day_of_week = Column(Integer, default=1)     # 0=Mon .. 6=Sun (weekly only)

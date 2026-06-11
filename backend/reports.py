@@ -42,10 +42,10 @@ def _percentile(values: list[float], pct: float) -> float:
     return s[lo] + (s[hi] - s[lo]) * frac
 
 
-def gather_report_data(db: Session, range_: str) -> dict:
-    """Aggregate everything needed to render a report for the given range.
+def gather_report_data(db: Session, env, range_: str) -> dict:
+    """Aggregate everything needed to render a report for the given env + range.
 
-    Returns a dict with: range, generated_at, totals (current/previous/deltas),
+    Returns a dict with: env, range, generated_at, totals (current/previous/deltas),
     daily, per_dag, slowest_dags, most_failures, top_failures, busy_hours.
     """
     if range_ not in REPORT_RANGES:
@@ -58,6 +58,7 @@ def gather_report_data(db: Session, range_: str) -> dict:
 
     def window(start, end):
         return db.query(DAGRun).filter(
+            DAGRun.environment_id == env.id,
             DAGRun.start_date.isnot(None),
             DAGRun.start_date >= start,
             DAGRun.start_date < end,
@@ -151,6 +152,7 @@ def gather_report_data(db: Session, range_: str) -> dict:
         failed_task = (
             db.query(TaskInstance)
             .filter(
+                TaskInstance.environment_id == env.id,
                 TaskInstance.dag_id == run.dag_id,
                 TaskInstance.run_id == run.run_id,
                 TaskInstance.state == "failed",
@@ -168,7 +170,11 @@ def gather_report_data(db: Session, range_: str) -> dict:
                     snippet = snippet[:ERROR_SNIPPET_LIMIT] + "…"
         annotation = (
             db.query(RunAnnotation)
-            .filter(RunAnnotation.dag_id == run.dag_id, RunAnnotation.run_id == run.run_id)
+            .filter(
+                RunAnnotation.environment_id == env.id,
+                RunAnnotation.dag_id == run.dag_id,
+                RunAnnotation.run_id == run.run_id,
+            )
             .first()
         )
         top_failures.append({
@@ -183,7 +189,13 @@ def gather_report_data(db: Session, range_: str) -> dict:
 
     # SLA performance — per-DAG hits/misses for the window
     sla_summary = []
-    sla_configs = {c.dag_id: c for c in db.query(DagSlaConfig).filter(DagSlaConfig.enabled.is_(True)).all()}
+    sla_configs = {
+        c.dag_id: c
+        for c in db.query(DagSlaConfig).filter(
+            DagSlaConfig.environment_id == env.id,
+            DagSlaConfig.enabled.is_(True),
+        ).all()
+    }
     if sla_configs:
         # Re-bucket runs by dag for SLA evaluation
         runs_by_dag: dict[str, list] = {}
@@ -216,6 +228,7 @@ def gather_report_data(db: Session, range_: str) -> dict:
     sla_summary.sort(key=lambda x: (-x["breaches"], x["dag_id"]))
 
     return {
+        "environment": getattr(env, "name", None),
         "range": range_,
         "generated_at": now.isoformat(sep=" ", timespec="seconds") + " UTC",
         "window_start": cutoff.isoformat(sep=" ", timespec="minutes") + " UTC",
@@ -271,7 +284,11 @@ def render_markdown(data: dict) -> str:
     lines: list[str] = []
     lines.append(f"# PipelinePulse Report — {range_label}")
     lines.append("")
-    lines.append(f"_Generated {data['generated_at']} · window {data['window_start']} → {data['window_end']}_")
+    env_label = data.get("environment")
+    if env_label:
+        lines.append(f"_Environment: **{env_label}** · generated {data['generated_at']} · window {data['window_start']} → {data['window_end']}_")
+    else:
+        lines.append(f"_Generated {data['generated_at']} · window {data['window_start']} → {data['window_end']}_")
     lines.append("")
 
     # Executive summary

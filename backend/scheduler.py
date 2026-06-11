@@ -1,7 +1,11 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
 from database import SessionLocal
-from models import DAGRun, TaskInstance, Notification, DagAlertConfig, ReportRun, ReportSchedule, DagSlaConfig
+from models import (
+    DAGRun, TaskInstance, Notification, DagAlertConfig, ReportRun, ReportSchedule,
+    DagSlaConfig, Environment,
+)
+from environment import list_environments
 from airflow_client import get_dags, get_dag_runs, get_task_instances, get_task_logs
 from notifier import send_failure_alert, send_report_notification, send_sla_alert, webhook_url
 import sla as sla_lib
@@ -15,6 +19,7 @@ except ImportError:  # pragma: no cover
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 def _parse_hhmm(value):
     if not value:
@@ -43,15 +48,18 @@ def _in_quiet_hours(cfg: DagAlertConfig) -> bool:
 
     if start < end:
         return start <= now < end
-    # wrap-around window (e.g. 22:00 → 06:00)
     return now >= start or now < end
 
 
-def _consecutive_failure_count(db: Session, dag_id: str) -> int:
+def _consecutive_failure_count(db: Session, env_id: int, dag_id: str) -> int:
     """How many of the most recent runs failed in a row, ending with the most recent."""
     recent = (
         db.query(DAGRun)
-        .filter(DAGRun.dag_id == dag_id, DAGRun.state.in_(("success", "failed")))
+        .filter(
+            DAGRun.environment_id == env_id,
+            DAGRun.dag_id == dag_id,
+            DAGRun.state.in_(("success", "failed")),
+        )
         .order_by(DAGRun.start_date.desc().nullslast())
         .limit(20)
         .all()
@@ -65,9 +73,10 @@ def _consecutive_failure_count(db: Session, dag_id: str) -> int:
     return count
 
 
-def _maybe_alert(db, dag_id: str, run_id: str):
-    """Fire a webhook alert for a newly-failed run, exactly once per run, honoring per-DAG config."""
+def _maybe_alert(db, env: Environment, dag_id: str, run_id: str):
+    """Fire a webhook alert for a newly-failed run, exactly once per (env, run)."""
     already = db.query(Notification).filter(
+        Notification.environment_id == env.id,
         Notification.dag_id == dag_id,
         Notification.run_id == run_id,
         Notification.event == "run_failed",
@@ -76,13 +85,16 @@ def _maybe_alert(db, dag_id: str, run_id: str):
     if already:
         return
 
-    cfg = db.query(DagAlertConfig).filter(DagAlertConfig.dag_id == dag_id).first()
+    cfg = db.query(DagAlertConfig).filter(
+        DagAlertConfig.environment_id == env.id,
+        DagAlertConfig.dag_id == dag_id,
+    ).first()
     suppressed_reason = None
     if cfg is not None:
         if cfg.muted:
             suppressed_reason = "muted"
         elif cfg.min_consecutive_failures and cfg.min_consecutive_failures > 1:
-            streak = _consecutive_failure_count(db, dag_id)
+            streak = _consecutive_failure_count(db, env.id, dag_id)
             if streak < cfg.min_consecutive_failures:
                 suppressed_reason = f"below_threshold({streak}/{cfg.min_consecutive_failures})"
         if suppressed_reason is None and _in_quiet_hours(cfg):
@@ -90,13 +102,14 @@ def _maybe_alert(db, dag_id: str, run_id: str):
 
     if suppressed_reason:
         db.add(Notification(
-            dag_id=dag_id, run_id=run_id, event="run_failed",
+            environment_id=env.id, dag_id=dag_id, run_id=run_id, event="run_failed",
             delivered=f"suppressed:{suppressed_reason}", webhook_url=webhook_url() or "",
         ))
-        logger.info(f"Alert suppressed for {dag_id}/{run_id}: {suppressed_reason}")
+        logger.info(f"[{env.name}] Alert suppressed for {dag_id}/{run_id}: {suppressed_reason}")
         return
 
     failed_task = db.query(TaskInstance).filter(
+        TaskInstance.environment_id == env.id,
         TaskInstance.dag_id == dag_id,
         TaskInstance.run_id == run_id,
         TaskInstance.state == "failed",
@@ -104,12 +117,12 @@ def _maybe_alert(db, dag_id: str, run_id: str):
     snippet = failed_task.error_message if failed_task else None
 
     url = webhook_url()
-    delivered = send_failure_alert(dag_id, run_id, snippet)
+    delivered = send_failure_alert(env, dag_id, run_id, snippet)
     db.add(Notification(
-        dag_id=dag_id, run_id=run_id, event="run_failed",
+        environment_id=env.id, dag_id=dag_id, run_id=run_id, event="run_failed",
         delivered=delivered, webhook_url=url or "",
     ))
-    logger.info(f"Webhook alert for {dag_id}/{run_id}: {delivered}")
+    logger.info(f"[{env.name}] Webhook alert for {dag_id}/{run_id}: {delivered}")
 
 
 def _extract_error(log_text):
@@ -138,89 +151,124 @@ def parse_dt(dt_str):
         logger.warning(f"Could not parse datetime '{dt_str}': {e}")
         return None
 
+
 SYNC_RUN_LIMIT = 50
 
 
-def sync_airflow_data(run_limit: int = SYNC_RUN_LIMIT):
-    logger.info("Syncing Airflow data...")
-    db = SessionLocal()
+def _sync_one_env(db, env: Environment, run_limit: int = SYNC_RUN_LIMIT):
+    logger.info(f"[{env.name}] Syncing Airflow data...")
     try:
-        dags = get_dags()
-        for dag in dags:
-            dag_id = dag["dag_id"]
-            runs = get_dag_runs(dag_id, limit=run_limit)
-            for run in runs:
-                run_id = run["dag_run_id"]
-                start = parse_dt(run.get("start_date"))
-                end = parse_dt(run.get("end_date"))
-                duration = (end - start).total_seconds() if start and end else None
-                new_state = run.get("state")
-                existing = db.query(DAGRun).filter(DAGRun.run_id == run_id).first()
-                state_transitioned_to_failed = False
-                if not existing:
-                    db.add(DAGRun(
+        dags = get_dags(env)
+    except Exception as e:
+        logger.error(f"[{env.name}] Failed to fetch DAGs: {e}")
+        return
+
+    for dag in dags:
+        dag_id = dag["dag_id"]
+        try:
+            runs = get_dag_runs(env, dag_id, limit=run_limit)
+        except Exception as e:
+            logger.warning(f"[{env.name}] Failed to fetch runs for {dag_id}: {e}")
+            continue
+
+        for run in runs:
+            run_id = run["dag_run_id"]
+            start = parse_dt(run.get("start_date"))
+            end = parse_dt(run.get("end_date"))
+            duration = (end - start).total_seconds() if start and end else None
+            new_state = run.get("state")
+            existing = db.query(DAGRun).filter(
+                DAGRun.environment_id == env.id,
+                DAGRun.run_id == run_id,
+            ).first()
+            state_transitioned_to_failed = False
+            if not existing:
+                db.add(DAGRun(
+                    environment_id=env.id,
+                    dag_id=dag_id,
+                    run_id=run_id,
+                    state=new_state,
+                    start_date=start,
+                    end_date=end,
+                    duration_seconds=duration,
+                ))
+                if new_state == "failed":
+                    state_transitioned_to_failed = True
+            else:
+                if existing.state != "failed" and new_state == "failed":
+                    state_transitioned_to_failed = True
+                existing.state = new_state
+                existing.end_date = end
+                existing.duration_seconds = duration
+            db.flush()
+
+            try:
+                tasks = get_task_instances(env, dag_id, run_id)
+            except Exception as e:
+                logger.debug(f"[{env.name}] tasks fetch failed for {dag_id}/{run_id}: {e}")
+                tasks = []
+
+            for task in tasks:
+                task_id = task["task_id"]
+                t_start = parse_dt(task.get("start_date"))
+                t_end = parse_dt(task.get("end_date"))
+                t_duration = (t_end - t_start).total_seconds() if t_start and t_end else None
+                try_number = task.get("try_number")
+                state = task.get("state")
+
+                error_message = None
+                if state == "failed" and try_number:
+                    try:
+                        log_text = get_task_logs(env, dag_id, run_id, task_id, attempt=try_number)
+                        error_message = _extract_error(log_text)
+                    except Exception as e:
+                        logger.debug(f"Could not fetch logs for {task_id}: {e}")
+
+                existing_task = db.query(TaskInstance).filter(
+                    TaskInstance.environment_id == env.id,
+                    TaskInstance.run_id == run_id,
+                    TaskInstance.task_id == task_id,
+                ).first()
+                if not existing_task:
+                    db.add(TaskInstance(
+                        environment_id=env.id,
                         dag_id=dag_id,
                         run_id=run_id,
-                        state=new_state,
-                        start_date=start,
-                        end_date=end,
-                        duration_seconds=duration
+                        task_id=task_id,
+                        state=state,
+                        start_date=t_start,
+                        end_date=t_end,
+                        duration_seconds=t_duration,
+                        try_number=try_number,
+                        error_message=error_message,
                     ))
-                    if new_state == "failed":
-                        state_transitioned_to_failed = True
                 else:
-                    if existing.state != "failed" and new_state == "failed":
-                        state_transitioned_to_failed = True
-                    existing.state = new_state
-                    existing.end_date = end
-                    existing.duration_seconds = duration
+                    existing_task.state = state
+                    existing_task.end_date = t_end
+                    existing_task.duration_seconds = t_duration
+                    existing_task.try_number = try_number
+                    if error_message:
+                        existing_task.error_message = error_message
                 db.flush()
 
-                tasks = get_task_instances(dag_id, run_id)
-                for task in tasks:
-                    task_id = task["task_id"]
-                    t_start = parse_dt(task.get("start_date"))
-                    t_end = parse_dt(task.get("end_date"))
-                    t_duration = (t_end - t_start).total_seconds() if t_start and t_end else None
-                    try_number = task.get("try_number")
-                    state = task.get("state")
+            if state_transitioned_to_failed:
+                _maybe_alert(db, env, dag_id, run_id)
 
-                    error_message = None
-                    if state == "failed" and try_number:
-                        try:
-                            log_text = get_task_logs(dag_id, run_id, task_id, attempt=try_number)
-                            error_message = _extract_error(log_text)
-                        except Exception as e:
-                            logger.debug(f"Could not fetch logs for {task_id}: {e}")
 
-                    existing_task = db.query(TaskInstance).filter(
-                        TaskInstance.run_id == run_id,
-                        TaskInstance.task_id == task_id
-                    ).first()
-                    if not existing_task:
-                        db.add(TaskInstance(
-                            dag_id=dag_id,
-                            run_id=run_id,
-                            task_id=task_id,
-                            state=state,
-                            start_date=t_start,
-                            end_date=t_end,
-                            duration_seconds=t_duration,
-                            try_number=try_number,
-                            error_message=error_message,
-                        ))
-                    else:
-                        existing_task.state = state
-                        existing_task.end_date = t_end
-                        existing_task.duration_seconds = t_duration
-                        existing_task.try_number = try_number
-                        if error_message:
-                            existing_task.error_message = error_message
-                    db.flush()
-
-                if state_transitioned_to_failed:
-                    _maybe_alert(db, dag_id, run_id)
-
+def sync_airflow_data(run_limit: int = SYNC_RUN_LIMIT):
+    db = SessionLocal()
+    try:
+        envs = list_environments(db, enabled_only=True)
+        if not envs:
+            logger.info("No enabled environments to sync.")
+            return
+        for env in envs:
+            try:
+                _sync_one_env(db, env, run_limit=run_limit)
+            except Exception as e:
+                logger.error(f"[{env.name}] sync failed: {e}", exc_info=True)
+                db.rollback()
+                continue
         db.commit()
         logger.info("Sync complete.")
     except Exception as e:
@@ -229,12 +277,12 @@ def sync_airflow_data(run_limit: int = SYNC_RUN_LIMIT):
     finally:
         db.close()
 
-def resync_run(dag_id: str, run_id: str) -> dict:
+
+def resync_run(env: Environment, dag_id: str, run_id: str) -> dict:
     """Force-refresh a single run + its tasks from Airflow, including logs."""
-    from airflow_client import get_dag_runs as _get_runs
     db = SessionLocal()
     try:
-        runs = _get_runs(dag_id, limit=200)
+        runs = get_dag_runs(env, dag_id, limit=200)
         run = next((r for r in runs if r["dag_run_id"] == run_id), None)
         if not run:
             return {"resynced": False, "reason": "run not found in Airflow"}
@@ -242,13 +290,16 @@ def resync_run(dag_id: str, run_id: str) -> dict:
         start = parse_dt(run.get("start_date"))
         end = parse_dt(run.get("end_date"))
         duration = (end - start).total_seconds() if start and end else None
-        existing = db.query(DAGRun).filter(DAGRun.run_id == run_id).first()
+        existing = db.query(DAGRun).filter(
+            DAGRun.environment_id == env.id,
+            DAGRun.run_id == run_id,
+        ).first()
         if existing:
             existing.state = run.get("state")
             existing.end_date = end
             existing.duration_seconds = duration
 
-        tasks = get_task_instances(dag_id, run_id)
+        tasks = get_task_instances(env, dag_id, run_id)
         for task in tasks:
             task_id = task["task_id"]
             t_start = parse_dt(task.get("start_date"))
@@ -260,12 +311,13 @@ def resync_run(dag_id: str, run_id: str) -> dict:
             error_message = None
             if state == "failed" and try_number:
                 try:
-                    log_text = get_task_logs(dag_id, run_id, task_id, attempt=try_number)
+                    log_text = get_task_logs(env, dag_id, run_id, task_id, attempt=try_number)
                     error_message = _extract_error(log_text)
                 except Exception:
                     pass
 
             existing_task = db.query(TaskInstance).filter(
+                TaskInstance.environment_id == env.id,
                 TaskInstance.run_id == run_id,
                 TaskInstance.task_id == task_id,
             ).first()
@@ -279,6 +331,7 @@ def resync_run(dag_id: str, run_id: str) -> dict:
                     existing_task.error_message = error_message
             else:
                 db.add(TaskInstance(
+                    environment_id=env.id,
                     dag_id=dag_id, run_id=run_id, task_id=task_id, state=state,
                     start_date=t_start, end_date=t_end, duration_seconds=t_duration,
                     try_number=try_number, error_message=error_message,
@@ -293,68 +346,85 @@ def resync_run(dag_id: str, run_id: str) -> dict:
 
 
 def _check_sla_breaches():
-    """Scan recent terminal runs for SLA breaches, fire one webhook per (run, kind)."""
+    """Scan recent terminal runs across all envs for SLA breaches."""
     db = SessionLocal()
     try:
-        configs = {c.dag_id: c for c in db.query(DagSlaConfig).filter(DagSlaConfig.enabled.is_(True)).all()}
-        if not configs:
+        envs = list_environments(db, enabled_only=True)
+        if not envs:
             return
 
         cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=2)
-        runs = (
-            db.query(DAGRun)
-            .filter(
-                DAGRun.dag_id.in_(list(configs.keys())),
-                DAGRun.start_date.isnot(None),
-                DAGRun.start_date >= cutoff,
-                DAGRun.state.in_(("success", "failed")),
-            )
-            .all()
-        )
-        if not runs:
-            return
-
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        for run in runs:
-            cfg = configs.get(run.dag_id)
-            breach = sla_lib.evaluate_run(run, cfg, now)
-            if breach is None:
+
+        for env in envs:
+            configs = {
+                c.dag_id: c
+                for c in db.query(DagSlaConfig).filter(
+                    DagSlaConfig.environment_id == env.id,
+                    DagSlaConfig.enabled.is_(True),
+                ).all()
+            }
+            if not configs:
                 continue
 
-            event = f"sla_{breach.kind}"  # "sla_deadline_missed" | "sla_max_runtime"
-
-            # Dedup: skip if we already sent this exact event for this run successfully
-            already = db.query(Notification).filter(
-                Notification.dag_id == run.dag_id,
-                Notification.run_id == run.run_id,
-                Notification.event == event,
-                Notification.delivered == "ok",
-            ).first()
-            if already:
+            runs = (
+                db.query(DAGRun)
+                .filter(
+                    DAGRun.environment_id == env.id,
+                    DAGRun.dag_id.in_(list(configs.keys())),
+                    DAGRun.start_date.isnot(None),
+                    DAGRun.start_date >= cutoff,
+                    DAGRun.state.in_(("success", "failed")),
+                )
+                .all()
+            )
+            if not runs:
                 continue
 
-            # Honor existing per-DAG alert config (mute / quiet hours / threshold)
-            alert_cfg = db.query(DagAlertConfig).filter(DagAlertConfig.dag_id == run.dag_id).first()
-            suppressed_reason = None
-            if alert_cfg is not None:
-                if alert_cfg.muted:
-                    suppressed_reason = "muted"
-                elif _in_quiet_hours(alert_cfg):
-                    suppressed_reason = "quiet_hours"
+            for run in runs:
+                cfg = configs.get(run.dag_id)
+                breach = sla_lib.evaluate_run(run, cfg, now)
+                if breach is None:
+                    continue
 
-            if suppressed_reason:
+                event = f"sla_{breach.kind}"
+
+                already = db.query(Notification).filter(
+                    Notification.environment_id == env.id,
+                    Notification.dag_id == run.dag_id,
+                    Notification.run_id == run.run_id,
+                    Notification.event == event,
+                    Notification.delivered == "ok",
+                ).first()
+                if already:
+                    continue
+
+                alert_cfg = db.query(DagAlertConfig).filter(
+                    DagAlertConfig.environment_id == env.id,
+                    DagAlertConfig.dag_id == run.dag_id,
+                ).first()
+                suppressed_reason = None
+                if alert_cfg is not None:
+                    if alert_cfg.muted:
+                        suppressed_reason = "muted"
+                    elif _in_quiet_hours(alert_cfg):
+                        suppressed_reason = "quiet_hours"
+
+                if suppressed_reason:
+                    db.add(Notification(
+                        environment_id=env.id,
+                        dag_id=run.dag_id, run_id=run.run_id, event=event,
+                        delivered=f"suppressed:{suppressed_reason}", webhook_url=webhook_url() or "",
+                    ))
+                    continue
+
+                delivered = send_sla_alert(env, run.dag_id, run.run_id, breach.kind, breach.message)
                 db.add(Notification(
+                    environment_id=env.id,
                     dag_id=run.dag_id, run_id=run.run_id, event=event,
-                    delivered=f"suppressed:{suppressed_reason}", webhook_url=webhook_url() or "",
+                    delivered=delivered, webhook_url=webhook_url() or "",
                 ))
-                continue
-
-            delivered = send_sla_alert(run.dag_id, run.run_id, breach.kind, breach.message)
-            db.add(Notification(
-                dag_id=run.dag_id, run_id=run.run_id, event=event,
-                delivered=delivered, webhook_url=webhook_url() or "",
-            ))
-            logger.info(f"SLA alert {event} for {run.dag_id}/{run.run_id}: {delivered}")
+                logger.info(f"[{env.name}] SLA alert {event} for {run.dag_id}/{run.run_id}: {delivered}")
 
         db.commit()
     except Exception as e:
@@ -378,28 +448,25 @@ def _is_schedule_due(s: ReportSchedule, now: datetime) -> bool:
             return False
     else:
         return False
-    # Dedup: don't fire twice in the same period
     if s.last_sent_at is not None:
-        # Same calendar day → already sent
         if s.last_sent_at.date() == now.date():
             return False
     return True
 
 
 def _maybe_generate_scheduled_report():
-    """Runs every 15 min; checks whether a scheduled report is due and generates it."""
+    """Runs every 15 min; for each env with an enabled schedule that's due, generate."""
     db = SessionLocal()
     try:
-        s = db.query(ReportSchedule).filter(ReportSchedule.id == 1).first()
-        if s is None:
+        envs = list_environments(db, enabled_only=True)
+        if not envs:
             return
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        if not _is_schedule_due(s, now):
-            return
 
-        # Generate via the same library the HTTP endpoint uses.
-        import reports as reports_lib  # local import to avoid circular import at module load
+        import reports as reports_lib
         from settings import get_gemini_config
+
+        # Build Gemini handle once per cycle (shared across envs)
         gemini_handle = None
         api_key, model = get_gemini_config()
         if api_key:
@@ -410,31 +477,37 @@ def _maybe_generate_scheduled_report():
             except Exception as e:
                 logger.warning(f"Could not init Gemini for scheduled report: {e}")
 
-        data = reports_lib.gather_report_data(db, s.range)
-        if gemini_handle is not None:
-            data["ai_narrative"] = reports_lib.generate_ai_narrative(data, gemini_handle)
-        md = reports_lib.render_markdown(data)
-        summary = reports_lib.short_summary_line(data)
-        range_label = "weekly" if s.range == "7d" else "monthly"
+        for env in envs:
+            s = db.query(ReportSchedule).filter(ReportSchedule.environment_id == env.id).first()
+            if s is None or not _is_schedule_due(s, now):
+                continue
 
-        row = ReportRun(
-            range=s.range,
-            format=s.format,
-            source="scheduled",
-            summary_line=summary,
-            content_md=md,
-        )
-        db.add(row)
-        db.flush()  # get row.id
+            data = reports_lib.gather_report_data(db, env, s.range)
+            if gemini_handle is not None:
+                data["ai_narrative"] = reports_lib.generate_ai_narrative(data, gemini_handle)
+            md = reports_lib.render_markdown(data)
+            summary = reports_lib.short_summary_line(data)
+            range_label = "weekly" if s.range == "7d" else "monthly"
 
-        delivered = send_report_notification(
-            row.id, range_label, summary, override_url=s.webhook_url
-        )
-        row.delivered = delivered
-        row.webhook_url = s.webhook_url or webhook_url() or ""
-        s.last_sent_at = now
-        db.commit()
-        logger.info(f"Scheduled report #{row.id} generated and notified: {delivered}")
+            row = ReportRun(
+                environment_id=env.id,
+                range=s.range,
+                format=s.format,
+                source="scheduled",
+                summary_line=summary,
+                content_md=md,
+            )
+            db.add(row)
+            db.flush()
+
+            delivered = send_report_notification(
+                env, row.id, range_label, summary, override_url=s.webhook_url,
+            )
+            row.delivered = delivered
+            row.webhook_url = s.webhook_url or webhook_url() or ""
+            s.last_sent_at = now
+            db.commit()
+            logger.info(f"[{env.name}] Scheduled report #{row.id} generated and notified: {delivered}")
     except Exception as e:
         logger.error(f"Scheduled report generation failed: {e}", exc_info=True)
         db.rollback()
