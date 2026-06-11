@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Clock, Inbox, Play, RefreshCw, StickyNote } from "lucide-react";
-import { api, type DAG, type DAGRun, type SlaAtRisk, type SlaBreach, type StuckRun, type Summary } from "@/lib/api";
+import { api, getActiveEnv, setActiveEnv, type DAG, type DAGRun, type SlaAtRisk, type SlaBreach, type StuckRun, type Summary } from "@/lib/api";
 import { formatDuration, formatRelativeTime } from "@/lib/utils";
 import { Sidebar, type View } from "@/components/sidebar";
 import { AnalyticsView } from "@/components/analytics-view";
@@ -49,6 +49,8 @@ export function Dashboard() {
   const [annotated, setAnnotated] = useState<Set<string>>(new Set());
   const [atRisk, setAtRisk] = useState<SlaAtRisk[]>([]);
   const [slaBreaches, setSlaBreaches] = useState<Map<string, SlaBreach>>(new Map());
+  // Bumped when env changes to invalidate every effect that depends on the active env.
+  const [envVersion, setEnvVersion] = useState(0);
 
   const PAGE_SIZE = 10;
 
@@ -86,19 +88,48 @@ export function Dashboard() {
   };
 
   useEffect(() => {
-    loadGlobal();
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const v = params.get("view");
       if (v === "reports" || v === "analytics" || v === "settings" || v === "dashboard") {
         setView(v);
       }
+      // Pick up env from URL on first load (deep-link from webhook).
+      const envParam = params.get("env");
+      if (envParam) {
+        setActiveEnv(envParam);
+        setEnvVersion((v) => v + 1);
+      }
     }
+    loadGlobal();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Reload everything when env changes — except on the first mount, which the
+  // effect above already handles via loadGlobal().
+  useEffect(() => {
+    if (envVersion === 0) return;
+    setSelected(null);
+    setRuns([]);
+    setSelectedRun(null);
+    loadGlobal();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [envVersion]);
+
+  const onEnvChange = useCallback((envName: string) => {
+    setActiveEnv(envName);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.set("env", envName);
+      window.history.replaceState(null, "", url.toString());
+    }
+    setEnvVersion((v) => v + 1);
   }, []);
 
   useEffect(() => {
     if (selected) loadRuns(selected, range);
-  }, [selected, range]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, range, envVersion]);
 
   useEffect(() => {
     if (!selected) {
@@ -118,7 +149,7 @@ export function Dashboard() {
     return () => {
       cancelled = true;
     };
-  }, [selected]);
+  }, [selected, envVersion]);
 
   const onAnnotationChange = useCallback(
     (runId: string) => (hasNote: boolean) => {
@@ -221,6 +252,7 @@ export function Dashboard() {
         }}
         view={view}
         onChangeView={setView}
+        onEnvChange={onEnvChange}
       />
 
       <main className="flex-1 overflow-y-auto scrollbar-thin">

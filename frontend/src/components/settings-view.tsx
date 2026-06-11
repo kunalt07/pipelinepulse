@@ -23,6 +23,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/components/theme-provider";
+import { EnvironmentsCard } from "@/components/environments-card";
 import { cn } from "@/lib/utils";
 
 const cardEntry = {
@@ -656,10 +657,14 @@ export function SettingsView() {
       </motion.div>
 
       <motion.div {...cardEntry} transition={{ ...cardEntry.transition, delay: 0.15 }}>
-        <ThemeCard />
+        <EnvironmentsCard />
       </motion.div>
 
       <motion.div {...cardEntry} transition={{ ...cardEntry.transition, delay: 0.2 }}>
+        <ThemeCard />
+      </motion.div>
+
+      <motion.div {...cardEntry} transition={{ ...cardEntry.transition, delay: 0.25 }}>
         <DangerCard />
       </motion.div>
     </div>

@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Activity, BarChart3, FileText, LayoutDashboard, Search, Settings, Star, X } from "lucide-react";
-import type { DAG } from "@/lib/api";
+import { getActiveEnv, type DAG } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { EnvSwitcher } from "@/components/env-switcher";
 
 export type View = "dashboard" | "analytics" | "reports" | "settings";
 
@@ -14,9 +15,11 @@ type Props = {
   onSelect: (dagId: string) => void;
   view: View;
   onChangeView: (view: View) => void;
+  onEnvChange: (envName: string) => void;
 };
 
-const STORAGE_KEY = "pipelinepulse:pinned-dags";
+const PINNED_STORAGE_PREFIX = "pipelinepulse:pinned-dags";
+const LEGACY_PINNED_KEY = "pipelinepulse:pinned-dags"; // unscoped, for one-time migration
 
 const NAV_ITEMS: Array<{ icon: typeof LayoutDashboard; label: string; view: View; enabled: boolean }> = [
   { icon: LayoutDashboard, label: "Dashboard", view: "dashboard", enabled: true },
@@ -25,10 +28,21 @@ const NAV_ITEMS: Array<{ icon: typeof LayoutDashboard; label: string; view: View
   { icon: Settings, label: "Settings", view: "settings", enabled: true },
 ];
 
-function readPinned(): Set<string> {
+function pinnedKey(envName: string | null): string {
+  return envName ? `${PINNED_STORAGE_PREFIX}:${envName}` : PINNED_STORAGE_PREFIX;
+}
+
+function readPinned(envName: string | null): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    let raw = window.localStorage.getItem(pinnedKey(envName));
+    // One-time migration: if there's no per-env entry yet but a legacy unscoped key
+    // exists, copy it into the env-scoped key (and leave the legacy key alone so other
+    // envs don't lose it).
+    if (!raw && envName) {
+      raw = window.localStorage.getItem(LEGACY_PINNED_KEY);
+      if (raw) window.localStorage.setItem(pinnedKey(envName), raw);
+    }
     if (!raw) return new Set();
     const arr = JSON.parse(raw);
     return new Set(Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : []);
@@ -37,23 +51,35 @@ function readPinned(): Set<string> {
   }
 }
 
-function writePinned(pinned: Set<string>) {
+function writePinned(envName: string | null, pinned: Set<string>) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify([...pinned]));
+    window.localStorage.setItem(pinnedKey(envName), JSON.stringify([...pinned]));
   } catch {
     // ignore quota / disabled-storage errors
   }
 }
 
-export function Sidebar({ dags, selected, onSelect, view, onChangeView }: Props) {
+export function Sidebar({ dags, selected, onSelect, view, onChangeView, onEnvChange }: Props) {
   const [pinned, setPinned] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
+  const [activeEnv, setActiveEnv] = useState<string | null>(null);
   const filterRef = useRef<HTMLInputElement | null>(null);
 
+  // Re-read pinned set whenever the active env changes. Switching env triggers
+  // onEnvChange (which we wrap below) so the sidebar stays in sync without
+  // duplicating env-state ownership.
   useEffect(() => {
-    setPinned(readPinned());
+    const env = getActiveEnv();
+    setActiveEnv(env);
+    setPinned(readPinned(env));
   }, []);
+
+  const handleEnvChange = (envName: string) => {
+    setActiveEnv(envName);
+    setPinned(readPinned(envName));
+    onEnvChange(envName);
+  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -75,7 +101,7 @@ export function Sidebar({ dags, selected, onSelect, view, onChangeView }: Props)
       const next = new Set(prev);
       if (next.has(dagId)) next.delete(dagId);
       else next.add(dagId);
-      writePinned(next);
+      writePinned(activeEnv, next);
       return next;
     });
   };
@@ -136,6 +162,10 @@ export function Sidebar({ dags, selected, onSelect, view, onChangeView }: Props)
           <span className="text-sm font-bold tracking-tight">PipelinePulse</span>
         </div>
         <ThemeToggle />
+      </div>
+
+      <div className="border-b border-border px-3 py-2">
+        <EnvSwitcher onChange={handleEnvChange} />
       </div>
 
       <nav className="flex flex-col gap-0.5 border-b border-border px-2 py-3">

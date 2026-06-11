@@ -10,6 +10,46 @@ function authHeaders(): Record<string, string> {
   return { Authorization: `Basic ${token}` };
 }
 
+// ---------- Active environment ----------
+//
+// Multi-env: every API call may carry an `?env=<name>` query param. The active
+// env is set globally by the Dashboard (from URL ?env= or localStorage) and
+// threaded through `withEnv()` into every request. Initial value is null →
+// backend resolves to the default env.
+
+const ACTIVE_ENV_STORAGE_KEY = "pipelinepulse:active-env";
+let activeEnv: string | null = null;
+
+if (typeof window !== "undefined") {
+  try {
+    activeEnv = window.localStorage.getItem(ACTIVE_ENV_STORAGE_KEY);
+  } catch {
+    activeEnv = null;
+  }
+}
+
+export function getActiveEnv(): string | null {
+  return activeEnv;
+}
+
+export function setActiveEnv(name: string | null) {
+  activeEnv = name && name.trim() ? name : null;
+  if (typeof window !== "undefined") {
+    try {
+      if (activeEnv) window.localStorage.setItem(ACTIVE_ENV_STORAGE_KEY, activeEnv);
+      else window.localStorage.removeItem(ACTIVE_ENV_STORAGE_KEY);
+    } catch {
+      // ignore quota / disabled-storage errors
+    }
+  }
+}
+
+function withEnv(path: string): string {
+  if (!activeEnv) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}env=${encodeURIComponent(activeEnv)}`;
+}
+
 export type DAG = {
   dag_id: string;
   description?: string | null;
@@ -201,6 +241,38 @@ export type ReportSchedule = {
   global_webhook_configured: boolean;
 };
 
+export type EnvironmentInfo = {
+  id: number;
+  name: string;
+  airflow_base_url: string;
+  airflow_username: string | null;
+  airflow_public_url: string | null;
+  password_set: boolean;
+  is_default: boolean;
+  enabled: boolean;
+};
+
+export type EnvironmentCreate = {
+  name: string;
+  airflow_base_url: string;
+  airflow_username?: string | null;
+  airflow_password?: string | null;
+  airflow_public_url?: string | null;
+  is_default?: boolean;
+  enabled?: boolean;
+};
+
+export type EnvironmentUpdate = {
+  name?: string;
+  airflow_base_url?: string;
+  airflow_username?: string | null;
+  airflow_password?: string | null;
+  clear_password?: boolean;
+  airflow_public_url?: string | null;
+  is_default?: boolean;
+  enabled?: boolean;
+};
+
 export type TaskInstance = {
   task_id: string;
   state: string;
@@ -217,9 +289,37 @@ export type TaskLogs = {
   empty: boolean;
 };
 
+// Endpoints that should NOT have ?env= appended — they're env-agnostic.
+// Every other path gets the active env threaded through.
+const ENV_AGNOSTIC = [
+  "/health",
+  "/settings",          // matches /settings, /settings/danger/*  — handled by prefix below
+  "/environments",      // managing environments themselves shouldn't filter by active env
+  "/reports/schedule",  // (kept env-aware via the dependency, but the path is shared)
+];
+
+function shouldSkipEnv(path: string): boolean {
+  // strip query string for matching
+  const pure = path.split("?")[0];
+  if (pure === "/" || pure === "") return true;
+  if (pure === "/environments") return true;
+  if (pure.startsWith("/environments/")) return true;
+  if (pure === "/settings" || pure.startsWith("/settings/")) {
+    // Settings endpoints are env-agnostic EXCEPT the danger zone, which IS env-scoped.
+    return !pure.startsWith("/settings/danger/");
+  }
+  if (pure === "/health") return true;
+  return false;
+}
+
+function buildUrl(path: string): string {
+  const final = shouldSkipEnv(path) ? path : withEnv(path);
+  return `${API_URL}${final}`;
+}
+
 async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = { ...authHeaders(), ...(init?.headers ?? {}) };
-  const res = await fetch(`${API_URL}${path}`, { cache: "no-store", ...init, headers });
+  const res = await fetch(buildUrl(path), { cache: "no-store", ...init, headers });
   if (res.status === 401) throw new Error("Unauthorized — check AUTH_USER/AUTH_PASS");
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
   return res.json();
@@ -230,7 +330,7 @@ async function blobFetch(
   init?: RequestInit,
 ): Promise<{ blob: Blob; filename: string | null; reportId: number | null; summary: string | null }> {
   const headers = { ...authHeaders(), ...(init?.headers ?? {}) };
-  const res = await fetch(`${API_URL}${path}`, { cache: "no-store", ...init, headers });
+  const res = await fetch(buildUrl(path), { cache: "no-store", ...init, headers });
   if (res.status === 401) throw new Error("Unauthorized — check AUTH_USER/AUTH_PASS");
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
   const disposition = res.headers.get("Content-Disposition") ?? "";
@@ -366,6 +466,27 @@ export const api = {
   dangerFullResync: () =>
     jsonFetch<{ runs_deleted: number; tasks_deleted: number; runs_pulled: number }>(
       "/settings/danger/full-resync",
+      { method: "POST" },
+    ),
+  listEnvironments: () =>
+    jsonFetch<{ environments: EnvironmentInfo[] }>("/environments").then((r) => r.environments),
+  createEnvironment: (body: EnvironmentCreate) =>
+    jsonFetch<EnvironmentInfo>("/environments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  updateEnvironment: (id: number, body: EnvironmentUpdate) =>
+    jsonFetch<EnvironmentInfo>(`/environments/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  deleteEnvironment: (id: number) =>
+    jsonFetch<{ deleted: boolean; id: number }>(`/environments/${id}`, { method: "DELETE" }),
+  testEnvironment: (id: number) =>
+    jsonFetch<{ ok: boolean; latency_ms: number; error?: string }>(
+      `/environments/${id}/test`,
       { method: "POST" },
     ),
 };
