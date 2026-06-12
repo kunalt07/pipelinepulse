@@ -219,6 +219,61 @@ pipelinepulse/
         └── lib/                # API client, utilities
 ```
 
+## Screenshots
+
+### Multi-environment dashboard
+
+Run history, duration chart, SLA at-risk banner, stuck-run banner, 24h health strip, and metric tiles — all scoped to the active environment via the sidebar switcher.
+
+| Dark mode | Light mode |
+|---|---|
+| ![Dashboard, dark mode](screenshots/hero-dark.png) | ![Dashboard, light mode](screenshots/hero-light.png) |
+
+### Failure analysis
+
+| Captured task error | AI explanation |
+|---|---|
+| ![Task error captured from logs](screenshots/task-error.png) | ![AI failure analysis](screenshots/ai-analysis.png) |
+| The failed task's error is extracted from logs at sync time. | Optional Gemini-powered root cause + suggested fix. |
+
+### Webhook alerts
+
+![Discord failure alert](screenshots/discord-alert.png)
+
+Slack-format payload, dedup'd per run, with deep-link back to Airflow.
+
+### Analytics
+
+![Analytics view with prior-period deltas, failure-rate trend, and rankings](screenshots/analytics.png)
+
+Cross-DAG aggregates with 7d/30d toggle, prior-period deltas, slowest + most-failure-prone rankings, and busy-hours histogram.
+
+### Reports
+
+| In-app generation + history | Generated HTML report |
+|---|---|
+| ![Reports view](screenshots/reports.png) | ![Generated HTML report](screenshots/report-html.png) |
+| Markdown / HTML / PDF, on-demand or scheduled. | Self-contained HTML — paste into email, open from disk, or save. |
+
+### SLA tracking
+
+![Per-DAG SLA configuration](screenshots/sla-config.png)
+
+Per-DAG daily wall-clock deadline + max runtime caps. Breaches fire dedicated webhooks.
+
+### Run-vs-run diff
+
+![Run-vs-run diff with custom baseline](screenshots/run-vs-run-diff.png)
+
+Compare any two runs (same DAG or cross-DAG) and see task-level state + duration deltas.
+
+### Settings
+
+| Integrations + Sync + Stuck-run | Environments + API tokens + theme + danger zone |
+|---|---|
+| ![Settings, top half](screenshots/settings.png) | ![Settings, bottom half](screenshots/multi-env.png) |
+| Webhook URL, Gemini key, sync interval, stuck-run thresholds — all editable at runtime. | Manage Airflow connections, mint API tokens for scripts, theme, and irreversible "danger zone" actions. |
+
 ## Architecture
 
 The backend polls each enabled environment's Airflow REST API on an interval (default 2 min, editable via Settings). Runs and tasks are upserted into Postgres, scoped by `environment_id`. When a run transitions into `failed`, the backend captures an error excerpt from logs, fires the configured webhook (with dedup so it's only sent once per run), and records the notification.
