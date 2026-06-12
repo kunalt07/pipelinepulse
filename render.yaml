@@ -1,0 +1,62 @@
+# Render.com blueprint — one-click deploy of PipelinePulse.
+#
+# This deploys ONLY PipelinePulse (backend + frontend + Postgres). It does
+# NOT deploy Airflow itself — bring your own Airflow (MWAA, Composer,
+# Astronomer, self-hosted, etc.) and configure the connection from the UI
+# under Settings → Environments after first sign-in.
+#
+# After the deploy completes, set AUTH_USER + AUTH_PASS on the backend
+# service in the Render dashboard if you want the first admin seeded
+# automatically; otherwise, sign up via the /signup page.
+#
+# Docs: https://render.com/docs/blueprint-spec
+
+databases:
+  - name: pipelinepulse-db
+    databaseName: pipelinepulse
+    user: pipelinepulse
+    plan: free
+    postgresMajorVersion: 15
+
+services:
+  - type: web
+    name: pipelinepulse-backend
+    runtime: docker
+    rootDir: backend
+    plan: free
+    region: oregon
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pipelinepulse-db
+          property: connectionString
+      - key: COOKIE_SECURE
+        value: "true"          # Render serves HTTPS, so the cookie should be Secure
+      - key: CORS_ORIGINS
+        value: https://pipelinepulse-frontend.onrender.com
+      - key: PUBLIC_BASE_URL
+        value: https://pipelinepulse-frontend.onrender.com
+      # The user is expected to set these in the Render dashboard after deploy:
+      #   AUTH_USER, AUTH_PASS  (seeds first admin; can also sign up via UI)
+      #   GEMINI_API_KEY        (optional — enables AI features)
+      #   WEBHOOK_URL           (optional — enables alerts)
+      # Bring-your-own-Airflow: connect via Settings → Environments after
+      # first sign-in. The AIRFLOW_* env vars below seed the default env
+      # only if you set them before first boot.
+      - key: AIRFLOW_BASE_URL
+        sync: false            # prompts the user to set on deploy
+      - key: AIRFLOW_USERNAME
+        sync: false
+      - key: AIRFLOW_PASSWORD
+        sync: false
+
+  - type: web
+    name: pipelinepulse-frontend
+    runtime: docker
+    rootDir: frontend
+    plan: free
+    region: oregon
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        value: https://pipelinepulse-backend.onrender.com

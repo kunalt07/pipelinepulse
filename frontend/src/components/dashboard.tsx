@@ -263,6 +263,20 @@ export function Dashboard() {
         <>
         <header className="sticky top-0 z-10 flex h-14 items-center justify-between border-b bg-background/80 px-6 backdrop-blur">
           <div className="flex items-center gap-3">
+            {(() => {
+              // envVersion is in the deps of every effect that refetches; reading
+              // getActiveEnv() at render time is safe because state changes upstream
+              // bump envVersion, which re-renders this component.
+              const envName = getActiveEnv();
+              return envName ? (
+                <>
+                  <span className="rounded-full border border-brand/30 bg-brand/10 px-2 py-0.5 font-mono text-[10px] font-bold tracking-wide text-brand">
+                    {envName}
+                  </span>
+                  <span className="text-xs text-muted-foreground/50">/</span>
+                </>
+              ) : null;
+            })()}
             <span className="text-xs font-medium text-muted-foreground">Dashboard</span>
             <span className="text-xs text-muted-foreground/50">/</span>
             <div>

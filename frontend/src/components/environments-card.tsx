@@ -139,8 +139,30 @@ export function EnvironmentsCard() {
     try {
       await api.deleteEnvironment(id);
       await reload();
+      return;
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Delete failed");
+      const msg = e instanceof Error ? e.message : "Delete failed";
+      // Backend refuses cascadeless delete on envs with run history; offer cascade.
+      if (msg.toLowerCase().includes("cascade=true")) {
+        const cascadeOk = confirm(
+          "This environment has run history (runs, tasks, alerts, SLAs, reports, " +
+            "annotations).\n\n" +
+            "Delete the environment AND all its scoped data? This cannot be undone.",
+        );
+        if (!cascadeOk) {
+          setError("Delete cancelled.");
+          return;
+        }
+        try {
+          await api.deleteEnvironment(id, { cascade: true });
+          await reload();
+          return;
+        } catch (e2) {
+          setError(e2 instanceof Error ? e2.message : "Cascade delete failed");
+          return;
+        }
+      }
+      setError(msg);
     }
   };
 

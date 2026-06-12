@@ -525,8 +525,11 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
-  deleteEnvironment: (id: number) =>
-    jsonFetch<{ deleted: boolean; id: number }>(`/environments/${id}`, { method: "DELETE" }),
+  deleteEnvironment: (id: number, opts: { cascade?: boolean } = {}) =>
+    jsonFetch<{ deleted: boolean; id: number; cascaded?: Record<string, number> }>(
+      `/environments/${id}${opts.cascade ? "?cascade=true" : ""}`,
+      { method: "DELETE" },
+    ),
   testEnvironment: (id: number) =>
     jsonFetch<{ ok: boolean; latency_ms: number; error?: string }>(
       `/environments/${id}/test`,

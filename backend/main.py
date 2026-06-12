@@ -1165,6 +1165,7 @@ def explain_failure(
     prompt = f"""
 You are a data engineering assistant. A pipeline run has failed.
 
+Environment: {env.name}
 DAG: {dag_id}
 Run ID: {run_id}
 Failed tasks (with log excerpts):
@@ -1221,7 +1222,7 @@ def stakeholder_summary(
     prompt = f"""
 You are explaining a data pipeline status to a non-technical business stakeholder.
 
-Pipeline: {dag_id}
+Pipeline: {dag_id} (environment: {env.name})
 Last {total} runs: {success_rate}% successful, {failed} failures
 
 Write a 2-3 sentence plain English status update. No technical jargon.
@@ -1351,9 +1352,17 @@ def update_environment(
 @app.delete("/environments/{env_id}")
 def delete_environment(
     env_id: int,
+    cascade: bool = False,
     db: Session = Depends(get_db),
     _: str = Depends(require_auth),
 ):
+    """Delete an environment.
+
+    Refuses if any historical rows exist UNLESS `?cascade=true` is passed,
+    in which case all env-scoped data is deleted alongside the env row.
+    Refuses to delete the default environment or the last remaining
+    environment regardless of cascade.
+    """
     env = db.query(Environment).filter(Environment.id == env_id).first()
     if env is None:
         raise HTTPException(status_code=404, detail="Environment not found")
@@ -1361,16 +1370,39 @@ def delete_environment(
         raise HTTPException(status_code=400, detail="Cannot delete the default environment")
     if db.query(Environment).count() <= 1:
         raise HTTPException(status_code=400, detail="Cannot delete the last environment")
-    # Refuse if historical rows exist — require explicit cleanup via danger-zone first
+
     has_runs = db.query(DAGRun).filter(DAGRun.environment_id == env.id).first()
-    if has_runs:
+    if has_runs and not cascade:
         raise HTTPException(
             status_code=400,
-            detail="Environment has run history. Use Settings → Danger zone → Full re-sync to clear it first.",
+            detail=(
+                "Environment has run history. Pass cascade=true to delete it "
+                "and all its scoped data (runs, tasks, alerts, SLA configs, "
+                "annotations, notifications, reports)."
+            ),
         )
+
+    deleted_counts: dict[str, int] = {}
+    if cascade:
+        # Order: child rows before parent. SQLAlchemy's bulk-delete bypasses
+        # ORM cascades but we have no FK CASCADE configured, so explicit is best.
+        for model, name in [
+            (TaskInstance, "task_instances"),
+            (DAGRun, "dag_runs"),
+            (RunAnnotation, "run_annotations"),
+            (DagAlertConfig, "dag_alert_configs"),
+            (DagSlaConfig, "dag_sla_configs"),
+            (Notification, "notifications"),
+            (ReportRun, "report_runs"),
+            (ReportSchedule, "report_schedules"),
+            (AIInsight, "ai_insights"),
+        ]:
+            n = db.query(model).filter(model.environment_id == env.id).delete()
+            if n:
+                deleted_counts[name] = n
     db.delete(env)
     db.commit()
-    return {"deleted": True, "id": env_id}
+    return {"deleted": True, "id": env_id, "cascaded": deleted_counts}
 
 
 @app.post("/environments/{env_id}/test")
