@@ -31,6 +31,20 @@ class UserSession(Base):
     user_agent = Column(String, nullable=True)
 
 
+class ApiToken(Base):
+    __tablename__ = "api_tokens"
+    __table_args__ = {'extend_existing': True}
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)              # human label
+    token_prefix = Column(String, nullable=False, index=True)  # first 8 chars of plaintext
+    token_hash = Column(String, nullable=False)         # bcrypt of full plaintext
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)        # soft-delete sentinel
+
+
 class Environment(Base):
     __tablename__ = "environments"
     __table_args__ = {'extend_existing': True}

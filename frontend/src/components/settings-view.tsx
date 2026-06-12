@@ -24,6 +24,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/components/theme-provider";
 import { EnvironmentsCard } from "@/components/environments-card";
+import { ApiTokensCard } from "@/components/api-tokens-card";
 import { cn } from "@/lib/utils";
 
 const cardEntry = {
@@ -658,6 +659,10 @@ export function SettingsView() {
 
       <motion.div {...cardEntry} transition={{ ...cardEntry.transition, delay: 0.15 }}>
         <EnvironmentsCard />
+      </motion.div>
+
+      <motion.div {...cardEntry} transition={{ ...cardEntry.transition, delay: 0.175 }}>
+        <ApiTokensCard />
       </motion.div>
 
       <motion.div {...cardEntry} transition={{ ...cardEntry.transition, delay: 0.2 }}>

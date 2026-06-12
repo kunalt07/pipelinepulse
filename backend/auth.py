@@ -11,13 +11,19 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import User, UserSession
+from models import ApiToken, User, UserSession
 
 logger = logging.getLogger(__name__)
 
 SESSION_COOKIE_NAME = "pipelinepulse_session"
 SESSION_DURATION = timedelta(days=30)
 SESSION_HARD_CAP = timedelta(days=60)
+
+# API tokens use a "pp_" prefix so leaked tokens are easy to grep for in logs.
+# Token shape: "pp_" + 64 hex chars (32 random bytes). The token_prefix column
+# stores the first 8 chars of plaintext for cheap lookup before bcrypt-verify.
+TOKEN_PREFIX = "pp_"
+TOKEN_PREFIX_LEN = 8  # how many chars of plaintext we index on (incl. "pp_")
 
 # Bcrypt via passlib; deprecated="auto" lets us roll the hash on next login if we
 # ever change rounds.
@@ -102,3 +108,85 @@ def current_user(
 
 def user_count(db: Session) -> int:
     return db.query(User).count()
+
+
+# ---------- API tokens ----------
+
+def generate_token() -> str:
+    """Returns a fresh plaintext API token, e.g. 'pp_<64 hex chars>'."""
+    return f"{TOKEN_PREFIX}{secrets.token_hex(32)}"
+
+
+def hash_token(plain: str) -> str:
+    return _pwd_context.hash(plain)
+
+
+def create_api_token(db: Session, user: User, name: str) -> tuple[ApiToken, str]:
+    """Mint a new token for `user`. Returns (row, plaintext) — plaintext is shown
+    once and never persisted."""
+    plaintext = generate_token()
+    row = ApiToken(
+        user_id=user.id,
+        name=name.strip()[:100] or "Unnamed token",
+        token_prefix=plaintext[:TOKEN_PREFIX_LEN],
+        token_hash=hash_token(plaintext),
+        created_at=datetime.utcnow(),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row, plaintext
+
+
+def revoke_api_token(db: Session, user: User, token_id: int) -> bool:
+    """Soft-delete a token. Returns True if a row was updated, False if not found
+    or owned by a different user."""
+    row = db.query(ApiToken).filter(
+        ApiToken.id == token_id,
+        ApiToken.user_id == user.id,
+        ApiToken.revoked_at.is_(None),
+    ).first()
+    if row is None:
+        return False
+    row.revoked_at = datetime.utcnow()
+    db.commit()
+    return True
+
+
+def list_api_tokens(db: Session, user: User) -> list[ApiToken]:
+    return (
+        db.query(ApiToken)
+        .filter(ApiToken.user_id == user.id, ApiToken.revoked_at.is_(None))
+        .order_by(ApiToken.created_at.desc())
+        .all()
+    )
+
+
+def get_user_from_bearer(db: Session, header_value: Optional[str]) -> Optional[User]:
+    """Resolve `Authorization: Bearer pp_<token>` to a User.
+
+    Two-step lookup: first a cheap WHERE on token_prefix (8 chars of hex = ~4B
+    distinct values, so almost always 0 or 1 row), then a bcrypt-verify on the
+    matched row. None on miss / revoked / bad format.
+    """
+    if not header_value:
+        return None
+    parts = header_value.strip().split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    plaintext = parts[1].strip()
+    if not plaintext.startswith(TOKEN_PREFIX) or len(plaintext) < TOKEN_PREFIX_LEN + 1:
+        return None
+
+    prefix = plaintext[:TOKEN_PREFIX_LEN]
+    candidates = (
+        db.query(ApiToken)
+        .filter(ApiToken.token_prefix == prefix, ApiToken.revoked_at.is_(None))
+        .all()
+    )
+    for row in candidates:
+        if verify_password(plaintext, row.token_hash):
+            row.last_used_at = datetime.utcnow()
+            db.commit()
+            return db.query(User).filter(User.id == row.user_id).first()
+    return None

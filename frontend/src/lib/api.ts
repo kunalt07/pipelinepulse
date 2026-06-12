@@ -253,6 +253,16 @@ export type CurrentUser = {
   last_login_at: string | null;
 };
 
+export type ApiTokenInfo = {
+  id: number;
+  name: string;
+  token_prefix: string;
+  created_at: string | null;
+  last_used_at: string | null;
+};
+
+export type NewApiToken = ApiTokenInfo & { plaintext: string };
+
 export type EnvironmentInfo = {
   id: number;
   name: string;
@@ -322,6 +332,7 @@ function shouldSkipEnv(path: string): boolean {
   }
   if (pure === "/health") return true;
   if (pure.startsWith("/auth/")) return true;
+  if (pure === "/api-tokens" || pure.startsWith("/api-tokens/")) return true;
   return false;
 }
 
@@ -537,6 +548,17 @@ export const api = {
     }),
   authLogout: () =>
     jsonFetch<{ ok: boolean }>("/auth/logout", { method: "POST" }),
+  // API tokens — for curl / scripts. Plaintext only ever returned by createApiToken.
+  listApiTokens: () =>
+    jsonFetch<{ tokens: ApiTokenInfo[] }>("/api-tokens").then((r) => r.tokens),
+  createApiToken: (name: string) =>
+    jsonFetch<NewApiToken>("/api-tokens", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }),
+  revokeApiToken: (id: number) =>
+    jsonFetch<{ revoked: boolean; id: number }>(`/api-tokens/${id}`, { method: "DELETE" }),
 };
 
 export function downloadBlob(blob: Blob, filename: string) {

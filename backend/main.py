@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 from database import get_db, engine, run_migrations
-from models import Base, DAGRun, TaskInstance, AIInsight, Notification, DagAlertConfig, ReportRun, ReportSchedule, RunAnnotation, DagSlaConfig, Environment, User, UserSession
+from models import Base, DAGRun, TaskInstance, AIInsight, Notification, DagAlertConfig, ReportRun, ReportSchedule, RunAnnotation, DagSlaConfig, Environment, User, UserSession, ApiToken
 import sla as sla_lib
 from notifier import send_failure_alert, webhook_url
 from scheduler import start_scheduler, resync_run
@@ -21,6 +21,7 @@ from auth import (
     SESSION_COOKIE_NAME, SESSION_DURATION,
     hash_password, verify_password,
     create_session, get_user_from_session, delete_session, current_user, user_count,
+    create_api_token, revoke_api_token, list_api_tokens, get_user_from_bearer,
 )
 
 load_dotenv()
@@ -62,20 +63,40 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # The browser hides response headers cross-origin by default; expose the
+    # ones we read from JS (report download metadata + Content-Disposition for
+    # the auto-named file).
+    expose_headers=["Content-Disposition", "X-Report-Id", "X-Report-Summary"],
 )
 
 COOKIE_SECURE = (os.getenv("COOKIE_SECURE") or "false").strip().lower() in ("1", "true", "yes")
 
 
-def require_auth(user: Optional[User] = Depends(current_user)) -> Optional[User]:
-    """Phase A: optional. Returns the User if a valid session cookie is present,
-    else None. The API still accepts unauthenticated requests during this phase
-    so existing curl/script integrations don't break — the web UI is gated by
-    the AuthProvider on the frontend.
+def require_auth(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> User:
+    """Authenticate the request via session cookie OR Authorization: Bearer token.
 
-    To tighten the gate later, raise 401 here when `user is None`.
+    - Session cookie: set by /auth/login, used by the web UI.
+    - Bearer token: 'Authorization: Bearer pp_<hex>', for curl/scripts. Created
+      via the API tokens UI in Settings.
+
+    Returns the authenticated User. Raises 401 when neither path validates.
+    The bootstrap endpoints (/, /health, /auth/login, /auth/signup) are NOT
+    decorated with this dependency and remain public.
     """
-    return user
+    sid = request.cookies.get(SESSION_COOKIE_NAME)
+    user = get_user_from_session(db, sid) if sid else None
+    if user:
+        return user
+
+    bearer = request.headers.get("authorization") or request.headers.get("Authorization")
+    user = get_user_from_bearer(db, bearer)
+    if user:
+        return user
+
+    raise HTTPException(status_code=401, detail="Authentication required")
 
 
 def _set_session_cookie(response: Response, session_id: str) -> None:
@@ -203,6 +224,56 @@ def me(user: Optional[User] = Depends(current_user)):
     if user is None:
         raise HTTPException(status_code=401, detail="Not signed in")
     return _serialize_user(user)
+
+
+# ---------- API tokens ----------
+
+
+class CreateTokenRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+
+def _serialize_token(t: ApiToken) -> dict:
+    """Public token info — never includes plaintext or hash."""
+    return {
+        "id": t.id,
+        "name": t.name,
+        "token_prefix": t.token_prefix,
+        "created_at": str(t.created_at) if t.created_at else None,
+        "last_used_at": str(t.last_used_at) if t.last_used_at else None,
+    }
+
+
+@app.get("/api-tokens")
+def list_tokens(
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    return {"tokens": [_serialize_token(t) for t in list_api_tokens(db, user)]}
+
+
+@app.post("/api-tokens")
+def create_token(
+    body: CreateTokenRequest,
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row, plaintext = create_api_token(db, user, body.name)
+    payload = _serialize_token(row)
+    payload["plaintext"] = plaintext  # one-time reveal — caller must save it now
+    return payload
+
+
+@app.delete("/api-tokens/{token_id}")
+def revoke_token(
+    token_id: int,
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    if not revoke_api_token(db, user, token_id):
+        raise HTTPException(status_code=404, detail="Token not found")
+    return {"revoked": True, "id": token_id}
+
 
 @app.get("/dags")
 def list_dags(env: Environment = Depends(env_dep), _: str = Depends(require_auth)):
