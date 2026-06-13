@@ -55,6 +55,9 @@ export function Dashboard() {
   // First-run wizard: shown when zero environments exist. null = haven't checked yet.
   const [envCount, setEnvCount] = useState<number | null>(null);
   const [wizardSkipped, setWizardSkipped] = useState(false);
+  // ?wizard=preview forces the wizard to render even when an env exists. Preview
+  // mode no-ops every save call so it can't touch the DB. Read once from URL.
+  const [wizardPreview, setWizardPreview] = useState(false);
 
   const PAGE_SIZE = 10;
 
@@ -124,6 +127,11 @@ export function Dashboard() {
       if (envParam) {
         setActiveEnv(envParam);
         setEnvVersion((v) => v + 1);
+      }
+      // Preview mode: ?wizard=preview forces the wizard to render even on an
+      // already-configured instance. Saves are no-ops in this mode.
+      if (params.get("wizard") === "preview") {
+        setWizardPreview(true);
       }
     }
     loadGlobal();
@@ -283,11 +291,16 @@ export function Dashboard() {
       />
 
       <main className="flex-1 overflow-y-auto scrollbar-thin">
-        {envCount === 0 && !wizardSkipped ? (
+        {(wizardPreview || (envCount === 0 && !wizardSkipped)) ? (
           <FirstRunWizard
-            onSkip={() => setWizardSkipped(true)}
+            preview={wizardPreview}
+            onSkip={() => {
+              setWizardSkipped(true);
+              setWizardPreview(false);
+            }}
             onComplete={() => {
               setWizardSkipped(false);
+              setWizardPreview(false);
               setEnvVersion((v) => v + 1);
             }}
           />

@@ -37,9 +37,13 @@ type Summary = {
 type Props = {
   onSkip: () => void;
   onComplete: () => void;
+  /** When true, "Save and continue" buttons advance the step WITHOUT calling
+   * any save APIs. Lets us walk through the UI on an already-set-up instance
+   * (via ?wizard=preview) without touching the DB. */
+  preview?: boolean;
 };
 
-export function FirstRunWizard({ onSkip, onComplete }: Props) {
+export function FirstRunWizard({ onSkip, onComplete, preview = false }: Props) {
   const [step, setStep] = useState<Step>("welcome");
   const [summary, setSummary] = useState<Summary>({
     airflowName: "",
@@ -68,6 +72,7 @@ export function FirstRunWizard({ onSkip, onComplete }: Props) {
               {step === "airflow" && (
                 <StepFrame key="airflow">
                   <AirflowStep
+                    preview={preview}
                     onSaved={(name) => {
                       setSummary((s) => ({ ...s, airflowName: name }));
                       advance("webhook");
@@ -78,6 +83,7 @@ export function FirstRunWizard({ onSkip, onComplete }: Props) {
               {step === "webhook" && (
                 <StepFrame key="webhook">
                   <WebhookStep
+                    preview={preview}
                     onDone={(configured) => {
                       setSummary((s) => ({ ...s, webhookConfigured: configured }));
                       advance("ai");
@@ -88,6 +94,7 @@ export function FirstRunWizard({ onSkip, onComplete }: Props) {
               {step === "ai" && (
                 <StepFrame key="ai">
                   <AIStep
+                    preview={preview}
                     onDone={(configured) => {
                       setSummary((s) => ({ ...s, aiConfigured: configured }));
                       advance("done");
@@ -227,7 +234,7 @@ function WelcomeStep({
 
 // ---------- Step: Connect Airflow ----------
 
-function AirflowStep({ onSaved }: { onSaved: (name: string) => void }) {
+function AirflowStep({ preview, onSaved }: { preview: boolean; onSaved: (name: string) => void }) {
   const [name, setName] = useState("production");
   const [baseUrl, setBaseUrl] = useState("");
   const [username, setUsername] = useState("");
@@ -261,6 +268,11 @@ function AirflowStep({ onSaved }: { onSaved: (name: string) => void }) {
   const onSave = async () => {
     setSaving(true);
     setSaveError(null);
+    if (preview) {
+      // Preview mode: skip the API call, just advance.
+      onSaved(name.trim());
+      return;
+    }
     try {
       await api.createEnvironment({
         name: name.trim(),
@@ -359,9 +371,9 @@ function AirflowStep({ onSaved }: { onSaved: (name: string) => void }) {
         </div>
       )}
 
-      <Button onClick={onSave} disabled={!probed || saving} className="w-full">
+      <Button onClick={onSave} disabled={!(probed || preview) || saving} className="w-full">
         {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-        Save and continue
+        {preview ? "Continue (preview)" : "Save and continue"}
       </Button>
     </div>
   );
@@ -369,7 +381,7 @@ function AirflowStep({ onSaved }: { onSaved: (name: string) => void }) {
 
 // ---------- Step: Webhook ----------
 
-function WebhookStep({ onDone }: { onDone: (configured: boolean) => void }) {
+function WebhookStep({ preview, onDone }: { preview: boolean; onDone: (configured: boolean) => void }) {
   const [url, setUrl] = useState("");
   const [probe, setProbe] = useState<ProbeState>({ kind: "idle" });
   const [saving, setSaving] = useState(false);
@@ -391,6 +403,10 @@ function WebhookStep({ onDone }: { onDone: (configured: boolean) => void }) {
 
   const onSave = async () => {
     setSaving(true);
+    if (preview) {
+      onDone(true);
+      return;
+    }
     try {
       await api.updateSettings({ webhook_url: url.trim() });
       onDone(true);
@@ -455,7 +471,7 @@ function WebhookStep({ onDone }: { onDone: (configured: boolean) => void }) {
 
 // ---------- Step: Gemini ----------
 
-function AIStep({ onDone }: { onDone: (configured: boolean) => void }) {
+function AIStep({ preview, onDone }: { preview: boolean; onDone: (configured: boolean) => void }) {
   const [key, setKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -463,6 +479,10 @@ function AIStep({ onDone }: { onDone: (configured: boolean) => void }) {
   const onSave = async () => {
     setSaving(true);
     setError(null);
+    if (preview) {
+      onDone(true);
+      return;
+    }
     try {
       await api.updateSettings({ gemini_api_key: key.trim() });
       onDone(true);
