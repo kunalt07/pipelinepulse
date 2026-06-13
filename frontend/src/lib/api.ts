@@ -333,6 +333,7 @@ function shouldSkipEnv(path: string): boolean {
   if (pure === "/health") return true;
   if (pure.startsWith("/auth/")) return true;
   if (pure === "/api-tokens" || pure.startsWith("/api-tokens/")) return true;
+  if (pure === "/settings/probe-webhook") return true;  // wizard probe — no env scope
   return false;
 }
 
@@ -535,6 +536,25 @@ export const api = {
       `/environments/${id}/test`,
       { method: "POST" },
     ),
+  probeAirflow: (body: {
+    airflow_base_url: string;
+    airflow_username?: string;
+    airflow_password?: string;
+  }) =>
+    jsonFetch<{ ok: boolean; latency_ms: number; error?: string }>(
+      "/environments/probe",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  probeWebhook: (webhook_url: string) =>
+    jsonFetch<{ ok: boolean; error?: string }>("/settings/probe-webhook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ webhook_url }),
+    }),
   // Auth — session-cookie-based.
   authMe: () => jsonFetch<CurrentUser>("/auth/me"),
   authLogin: (email: string, password: string) =>
