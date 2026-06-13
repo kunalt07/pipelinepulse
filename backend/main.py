@@ -1417,29 +1417,6 @@ def test_environment(
     return _airflow_probe(env)
 
 
-class ProbeAirflowRequest(BaseModel):
-    """Connection params for the first-run wizard's pre-save Airflow probe."""
-    airflow_base_url: str = Field(min_length=1, max_length=500)
-    airflow_username: Optional[str] = Field(default=None, max_length=100)
-    airflow_password: Optional[str] = Field(default=None, max_length=500)
-
-
-@app.post("/environments/probe")
-def probe_environment_connection(
-    body: ProbeAirflowRequest,
-    _: User = Depends(require_auth),
-):
-    """Probe an Airflow URL+creds without persisting an environment row.
-    Used by the first-run wizard so we can validate the connection before
-    committing it to the DB."""
-    spec = type("EnvSpec", (), {
-        "airflow_base_url": body.airflow_base_url.strip(),
-        "airflow_username": (body.airflow_username or "").strip() or None,
-        "airflow_password": (body.airflow_password or "").strip() or None,
-    })()
-    return _airflow_probe(spec)
-
-
 # ---------- Reports ----------
 
 REPORT_FORMATS = {"md", "html", "pdf"}
@@ -1747,29 +1724,6 @@ def write_settings(body: dict, _: str = Depends(require_auth)):
         _logging.getLogger(__name__).info("Sync interval setting changed")
 
     return _serialize_settings()
-
-
-class ProbeWebhookRequest(BaseModel):
-    """Webhook URL for the first-run wizard's pre-save delivery test."""
-    webhook_url: str = Field(min_length=1, max_length=500)
-
-
-@app.post("/settings/probe-webhook")
-def probe_webhook(
-    body: ProbeWebhookRequest,
-    _: User = Depends(require_auth),
-):
-    """Send a one-shot test message to a webhook URL without persisting it.
-    Used by the first-run wizard."""
-    import requests
-    payload = {"text": ":wave: PipelinePulse webhook test — your URL works."}
-    try:
-        r = requests.post(body.webhook_url.strip(), json=payload, timeout=8)
-        if r.status_code >= 300:
-            return {"ok": False, "error": f"HTTP {r.status_code}"}
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
 
 
 # ---------- Danger zone ----------

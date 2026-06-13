@@ -25,7 +25,6 @@ import { EmptyState } from "@/components/empty-state";
 import { AlertConfigPanel } from "@/components/alert-config-panel";
 import { SlaConfigPanel } from "@/components/sla-config-panel";
 import { SlaAtRiskBanner } from "@/components/sla-at-risk-banner";
-import { FirstRunWizard } from "@/components/first-run-wizard";
 
 const cardEntry = {
   initial: { opacity: 0, y: 10 },
@@ -52,34 +51,10 @@ export function Dashboard() {
   const [slaBreaches, setSlaBreaches] = useState<Map<string, SlaBreach>>(new Map());
   // Bumped when env changes to invalidate every effect that depends on the active env.
   const [envVersion, setEnvVersion] = useState(0);
-  // First-run wizard: shown when zero environments exist. null = haven't checked yet.
-  const [envCount, setEnvCount] = useState<number | null>(null);
-  const [wizardSkipped, setWizardSkipped] = useState(false);
 
   const PAGE_SIZE = 10;
 
   const loadGlobal = async () => {
-    // Fetch the env list FIRST and unconditionally — every other call needs a
-    // resolved environment, and on a fresh deploy there isn't one yet, so they'd
-    // 404. The wizard renders off `envCount === 0`, so we want that signal even
-    // when the rest of the API fails.
-    let envs: Awaited<ReturnType<typeof api.listEnvironments>> = [];
-    try {
-      envs = await api.listEnvironments();
-      setEnvCount(envs.length);
-    } catch (e) {
-      // listEnvironments going 401 means auth is broken; AuthProvider will
-      // catch that. Anything else: we still want to surface it.
-      setLoadError(e instanceof Error ? e.message : "Failed to reach backend");
-      return;
-    }
-
-    if (envs.length === 0) {
-      // No env yet → wizard takes over. Skip the env-scoped calls (they'd 404).
-      setLoadError(null);
-      return;
-    }
-
     try {
       const [s, d, st, ar, br] = await Promise.all([
         api.summary(),
@@ -244,9 +219,7 @@ export function Dashboard() {
     return { duration, success: success.slice(-20) };
   })();
 
-  // Don't show "backend unreachable" if envCount is 0 — that's the first-run case
-  // (wizard handles it). Only render the fallback for genuine connectivity failures.
-  if (loadError && dags.length === 0 && envCount !== 0) {
+  if (loadError && dags.length === 0) {
     return (
       <div className="flex h-screen items-center justify-center">
         <div className="max-w-md space-y-2 text-center">
@@ -283,16 +256,6 @@ export function Dashboard() {
       />
 
       <main className="flex-1 overflow-y-auto scrollbar-thin">
-        {envCount === 0 && !wizardSkipped ? (
-          <FirstRunWizard
-            onSkip={() => setWizardSkipped(true)}
-            onComplete={() => {
-              setWizardSkipped(false);
-              setEnvVersion((v) => v + 1);
-            }}
-          />
-        ) : (
-          <>
         {view === "analytics" && <AnalyticsView />}
         {view === "reports" && <ReportsView />}
         {view === "settings" && <SettingsView />}
@@ -669,8 +632,6 @@ export function Dashboard() {
           )}
         </div>
         </>
-        )}
-          </>
         )}
       </main>
     </div>
