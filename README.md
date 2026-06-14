@@ -73,15 +73,98 @@ All optional features degrade gracefully — if you don't set the relevant env v
 | Auth | bcrypt (passlib) + server-side sessions + Bearer tokens |
 | Infrastructure | Docker Compose |
 
-## Deploy to Render (cloud, no setup)
+## Deploy for free (recommended: Fly + Vercel + Supabase)
 
-The fastest way to try PipelinePulse against your existing Airflow:
+PipelinePulse is designed to run on free tiers. The recommended stack is:
 
-1. Click the **Deploy to Render** button above. It provisions Postgres + backend + frontend on Render's free tier (~3 min).
-2. Once it's up, open the frontend URL (e.g. `https://pipelinepulse-frontend.onrender.com`) and sign up.
-3. Settings → Environments → Add environment → enter your Airflow's URL + credentials → Test → Save.
+- **Backend** on Fly.io free tier (3 shared VMs included)
+- **Frontend** on Vercel free tier (auto-deploys from GitHub)
+- **Postgres** on Supabase free tier (500 MB, no expiration)
 
-The Render blueprint deploys *only* PipelinePulse — bring your own Airflow (MWAA, Composer, Astronomer Cloud, or any reachable Airflow 2.x instance with the REST API enabled).
+This gives you a real public URL like `https://pipelinepulse-yourname.vercel.app` that you can share. **No domain purchase, no monthly cost.** Trade-off: Fly auto-stops idle VMs, so the first request after a few minutes of inactivity adds a 5-10s wake-up delay.
+
+### Step 1 — Create the Postgres database (Supabase)
+
+1. Sign up at [supabase.com](https://supabase.com) (free, no card).
+2. Create a new project. Pick a region close to where Fly will run.
+3. Wait ~2 minutes for the DB to provision.
+4. Go to **Project Settings → Database → Connection string → URI**. Copy it.
+   It looks like:
+   ```
+   postgresql://postgres:[YOUR-PASSWORD]@db.xxxxxxxxxxxx.supabase.co:5432/postgres
+   ```
+
+### Step 2 — Deploy the backend (Fly.io)
+
+```bash
+# Install flyctl: https://fly.io/docs/flyctl/install/
+brew install flyctl                       # or curl -L https://fly.io/install.sh | sh
+
+flyctl auth signup                         # one-time
+
+cd backend
+
+# Edit fly.toml — change `app = "pipelinepulse"` to a globally-unique name
+# like `pipelinepulse-yourname`.
+
+# Set secrets (one-time). At minimum:
+flyctl secrets set \
+  DATABASE_URL='postgresql://postgres:...@db.xxx.supabase.co:5432/postgres' \
+  AUTH_USER='admin' \
+  AUTH_PASS="$(openssl rand -base64 24)" \
+  COOKIE_SECURE='true' \
+  CORS_ORIGINS='https://YOUR-FRONTEND.vercel.app' \
+  PUBLIC_BASE_URL='https://YOUR-FRONTEND.vercel.app'
+
+# Optional:
+flyctl secrets set \
+  GEMINI_API_KEY='AI...' \
+  WEBHOOK_URL='https://hooks.slack.com/services/...'
+
+# Note CORS_ORIGINS / PUBLIC_BASE_URL — you'll fill these in once Vercel
+# gives you the frontend URL, then re-run `flyctl secrets set` to update.
+
+flyctl deploy
+```
+
+After deploy, your backend is at `https://YOUR-APP.fly.dev`. Save your `AUTH_PASS` — you'll need it to sign in as the seeded admin.
+
+### Step 3 — Deploy the frontend (Vercel)
+
+1. Push this repo to your own GitHub fork.
+2. Sign up at [vercel.com](https://vercel.com) using GitHub.
+3. **Import Project** → pick the fork → set **Root Directory** to `frontend`.
+4. Under **Environment Variables**, add:
+   ```
+   NEXT_PUBLIC_API_URL = https://YOUR-APP.fly.dev
+   ```
+5. Deploy.
+
+### Step 4 — Connect them
+
+The first deploy will fail to load because CORS_ORIGINS on the backend doesn't include your Vercel URL yet. Update it:
+
+```bash
+flyctl secrets set \
+  CORS_ORIGINS='https://YOUR-FRONTEND.vercel.app' \
+  PUBLIC_BASE_URL='https://YOUR-FRONTEND.vercel.app'
+```
+
+Fly redeploys automatically on `secrets set`. Once it's up:
+
+1. Open your Vercel URL → redirected to `/login`
+2. Sign in with `admin` and the `AUTH_PASS` you set
+3. Settings → Environments → Add → connect your Airflow
+
+That's it.
+
+### Alternative: one-click deploy to Render
+
+The repo also includes `render.yaml` for [Render](https://render.com) deploys. Click below to provision Postgres + backend + frontend in Render's free tier:
+
+The Render free tier spins down after 15 min idle (first request takes 30-60s) and the free Postgres expires after 90 days, so it's only worth using if you don't want to bother with Fly. **Not recommended for anything you actually want to share.**
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/kunalt07/pipelinepulse)
 
 ## Quickstart (Docker — recommended)
 

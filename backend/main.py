@@ -122,12 +122,16 @@ def require_auth(
 
 
 def _set_session_cookie(response: Response, session_id: str) -> None:
+    # Cross-origin SPA cookies (production: Vercel frontend → Fly backend on
+    # different domains) require SameSite=None + Secure. Local dev (http://) uses
+    # Lax because browsers reject SameSite=None without Secure.
+    samesite = "none" if COOKIE_SECURE else "lax"
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=session_id,
         max_age=int(SESSION_DURATION.total_seconds()),
         httponly=True,
-        samesite="lax",
+        samesite=samesite,
         secure=COOKIE_SECURE,
         path="/",
     )

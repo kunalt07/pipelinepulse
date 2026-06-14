@@ -1,0 +1,61 @@
+# Fly.io app config — PipelinePulse backend.
+#
+# To deploy:
+#   1. Install flyctl:    https://fly.io/docs/flyctl/install/
+#   2. Sign up / login:   flyctl auth signup
+#   3. Set the app name:  edit `app = "..."` below to a unique global name,
+#                         e.g. "pipelinepulse-yourname"
+#   4. Set required env vars (one-time):
+#        flyctl secrets set DATABASE_URL='postgresql://...supabase...'
+#        flyctl secrets set AUTH_USER='admin' AUTH_PASS='<your_long_random_pass>'
+#        flyctl secrets set CORS_ORIGINS='https://YOUR-FRONTEND.vercel.app'
+#        flyctl secrets set PUBLIC_BASE_URL='https://YOUR-FRONTEND.vercel.app'
+#        flyctl secrets set COOKIE_SECURE='true'
+#        # Optional:
+#        flyctl secrets set GEMINI_API_KEY='AI...' WEBHOOK_URL='https://...'
+#   5. Deploy:            flyctl deploy
+#
+# Free tier: 3 shared-cpu-1x VMs + 3 GB storage. We use 1 VM (256MB).
+
+app = "pipelinepulse-pp"   # globally unique on Fly
+primary_region = "iad"     # change to closest region; see `flyctl platform regions`
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # Non-secret defaults. Secrets (AUTH_PASS, DATABASE_URL, GEMINI_API_KEY,
+  # WEBHOOK_URL, etc.) go via `flyctl secrets set` — never commit them.
+  PORT = "8000"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Free-tier trade-off: stop the VM when idle to save resources, wake on
+  # incoming request. Side effect — APScheduler runs in-process, so when the
+  # VM is stopped the periodic Airflow sync, SLA-breach check, and scheduled
+  # report jobs DON'T fire. They resume the next time someone hits the dashboard
+  # and wakes the VM. For a "share-the-URL" deployment this is fine; for a
+  # production SaaS you'd run a paid `min_machines_running = 1` or split the
+  # scheduler into a dedicated worker.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 250
+    soft_limit = 200
+
+  [[http_service.checks]]
+    grace_period = "30s"           # backend boots ~10s, +20s margin for migrations
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
