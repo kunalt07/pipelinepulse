@@ -218,6 +218,14 @@ class Setting(Base):
     __tablename__ = "settings"
     __table_args__ = {'extend_existing': True}
 
+    # Composite PK: (owner_user_id, key). owner_user_id = 0 is the sentinel for
+    # GLOBAL settings (those that apply across all users — e.g. stuck-run
+    # thresholds). Anything > 0 is a per-user override.
+    #
+    # The sentinel-zero convention beats the alternative of a NULLable column
+    # in the PK (PostgreSQL doesn't allow that) and is simpler to query/index
+    # than a partial-unique-index pattern.
+    owner_user_id = Column(Integer, primary_key=True)
     key = Column(String, primary_key=True)
     value = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

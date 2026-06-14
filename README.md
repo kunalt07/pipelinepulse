@@ -1,6 +1,6 @@
 # PipelinePulse
 
-Self-hosted monitoring + alerting dashboard for Apache Airflow. Point it at your Airflow's REST API and get a single pane of glass for run history, task-level errors, SLAs, alerts, and AI-assisted failure analysis — without paying for a SaaS observability tool.
+Multi-tenant monitoring + alerting dashboard for Apache Airflow. Sign up, connect your Airflow, and get a private single pane of glass for run history, task-level errors, SLAs, alerts, and AI-assisted failure analysis. Self-host or deploy to Render in one click.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/kunalt07/pipelinepulse)
 
@@ -11,6 +11,8 @@ Self-hosted monitoring + alerting dashboard for Apache Airflow. Point it at your
 ## Why
 
 Airflow's native UI is great for *operating* DAGs. It's not great for *monitoring* them: no alerts on failure, no quick way to see which task broke in a 50-task DAG, no SLA tracking, no friendly summaries to share with stakeholders. PipelinePulse fills that gap.
+
+Each PipelinePulse account is its own private tenant — your envs, runs, alerts, reports, and API tokens are isolated from every other user on the same instance. New users sign up to an empty dashboard and walk through a guided setup to connect their first Airflow.
 
 ## Features
 
@@ -45,8 +47,11 @@ Airflow's native UI is great for *operating* DAGs. It's not great for *monitorin
 - **Force re-sync** — pull a stale run from Airflow if its state changed after the periodic sync window.
 
 ### Auth & accounts
-- **Real user accounts** — email/password signup, server-side sessions (HttpOnly cookies, sliding 30-day expiry, hard-capped at 60). The first user becomes admin.
-- **API tokens** — create personal access tokens for curl/scripts. Sent as `Authorization: Bearer pp_…`. List, revoke, and view last-used time from Settings.
+- **Multi-tenant accounts** — email/password signup, server-side sessions (HttpOnly cookies, sliding 30-day expiry, hard-capped at 60). Each user is their own tenant: envs, runs, alerts, reports, and tokens are fully isolated. The first user signed up on a fresh instance becomes admin.
+- **First-run wizard** — new users land on a guided 5-step setup (welcome → connect Airflow → optional webhook → optional AI key → done). Triggers automatically when `envCount === 0` for the user.
+- **Per-user sync** — each user's Airflow connections poll on their own schedule (configurable via Settings → Sync). Sync jobs are registered on signup, rescheduled live when interval changes.
+- **API tokens** — personal access tokens for curl/scripts. Sent as `Authorization: Bearer pp_…`. List, revoke, and view last-used time from Settings.
+- **Rate limiting** — `slowapi` per-IP limits on `/auth/login` (5/min) and `/auth/signup` (3/hour) blunt brute-force attempts.
 
 ### Settings
 - **Runtime overrides** — change the webhook URL, Gemini key/model, sync interval, and stuck-run thresholds from the UI without restarting the backend.

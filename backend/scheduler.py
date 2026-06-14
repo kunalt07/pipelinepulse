@@ -106,7 +106,7 @@ def _maybe_alert(db, env: Environment, dag_id: str, run_id: str):
     if suppressed_reason:
         db.add(Notification(
             user_id=env.user_id, environment_id=env.id, dag_id=dag_id, run_id=run_id, event="run_failed",
-            delivered=f"suppressed:{suppressed_reason}", webhook_url=webhook_url() or "",
+            delivered=f"suppressed:{suppressed_reason}", webhook_url=webhook_url(user_id=env.user_id) or "",
         ))
         logger.info(f"[{env.name}] Alert suppressed for {dag_id}/{run_id}: {suppressed_reason}")
         return
@@ -120,7 +120,7 @@ def _maybe_alert(db, env: Environment, dag_id: str, run_id: str):
     ).order_by(TaskInstance.start_date.desc().nullslast()).first()
     snippet = failed_task.error_message if failed_task else None
 
-    url = webhook_url()
+    url = webhook_url(user_id=env.user_id)
     delivered = send_failure_alert(env, dag_id, run_id, snippet)
     db.add(Notification(
         user_id=env.user_id, environment_id=env.id, dag_id=dag_id, run_id=run_id, event="run_failed",
@@ -261,7 +261,36 @@ def _sync_one_env(db, env: Environment, run_limit: int = SYNC_RUN_LIMIT):
                 _maybe_alert(db, env, dag_id, run_id)
 
 
+def sync_one_user(user_id: int, run_limit: int = SYNC_RUN_LIMIT):
+    """Sync all enabled envs owned by a single user. Called by per-user scheduler jobs."""
+    db = SessionLocal()
+    try:
+        envs = (
+            db.query(Environment)
+            .filter(Environment.user_id == user_id, Environment.enabled.is_(True))
+            .all()
+        )
+        if not envs:
+            return
+        for env in envs:
+            try:
+                _sync_one_env(db, env, run_limit=run_limit)
+            except Exception as e:
+                logger.error(f"[user={user_id}/{env.name}] sync failed: {e}", exc_info=True)
+                db.rollback()
+                continue
+        db.commit()
+    except Exception as e:
+        logger.error(f"sync_one_user(user_id={user_id}) failed: {e}", exc_info=True)
+        db.rollback()
+    finally:
+        db.close()
+
+
 def sync_airflow_data(run_limit: int = SYNC_RUN_LIMIT):
+    """Legacy single-job sync — kept for backward compat with start_scheduler's
+    initial bootstrap call. Iterates over all enabled envs. Per-user jobs
+    take over after start_scheduler() registers them on boot."""
     db = SessionLocal()
     try:
         envs = list_all_environments(db, enabled_only=True)
@@ -280,6 +309,68 @@ def sync_airflow_data(run_limit: int = SYNC_RUN_LIMIT):
     except Exception as e:
         logger.error(f"Sync failed: {e}", exc_info=True)
         db.rollback()
+    finally:
+        db.close()
+
+
+# ---------- Per-user scheduler job lifecycle ----------
+
+
+_USER_SYNC_JOB_PREFIX = "sync_user_"
+
+
+def _user_sync_job_id(user_id: int) -> str:
+    return f"{_USER_SYNC_JOB_PREFIX}{user_id}"
+
+
+def register_user_sync_job(scheduler_ref, user_id: int) -> None:
+    """Register (or re-register) a per-user sync job. Reads the user's
+    sync_interval_minutes from settings; falls back to global default."""
+    from settings import get_setting
+    if scheduler_ref is None:
+        logger.warning("register_user_sync_job called before scheduler started")
+        return
+    try:
+        interval = int(get_setting("sync_interval_minutes", cast=int, user_id=user_id))
+    except Exception:
+        interval = 2
+    scheduler_ref.add_job(
+        sync_one_user,
+        "interval",
+        minutes=interval,
+        id=_user_sync_job_id(user_id),
+        replace_existing=True,
+        kwargs={"user_id": user_id},
+    )
+    logger.info(f"Registered sync job for user_id={user_id} at {interval} min interval")
+
+
+def remove_user_sync_job(scheduler_ref, user_id: int) -> None:
+    if scheduler_ref is None:
+        return
+    try:
+        scheduler_ref.remove_job(_user_sync_job_id(user_id))
+        logger.info(f"Removed sync job for user_id={user_id}")
+    except Exception as e:
+        logger.debug(f"remove_user_sync_job(user_id={user_id}): {e}")
+
+
+def register_all_user_sync_jobs(scheduler_ref) -> None:
+    """On startup, find every existing user with at least one env and register
+    a sync job for them. New users register their job on signup separately
+    (see auth.py / main.py wiring)."""
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Environment.user_id)
+            .filter(Environment.enabled.is_(True))
+            .distinct()
+            .all()
+        )
+        for (uid,) in rows:
+            register_user_sync_job(scheduler_ref, uid)
+    except Exception as e:
+        logger.error(f"register_all_user_sync_jobs failed: {e}", exc_info=True)
     finally:
         db.close()
 
@@ -426,7 +517,7 @@ def _check_sla_breaches():
                     db.add(Notification(
                         user_id=env.user_id, environment_id=env.id,
                         dag_id=run.dag_id, run_id=run.run_id, event=event,
-                        delivered=f"suppressed:{suppressed_reason}", webhook_url=webhook_url() or "",
+                        delivered=f"suppressed:{suppressed_reason}", webhook_url=webhook_url(user_id=env.user_id) or "",
                     ))
                     continue
 
@@ -434,7 +525,7 @@ def _check_sla_breaches():
                 db.add(Notification(
                     user_id=env.user_id, environment_id=env.id,
                     dag_id=run.dag_id, run_id=run.run_id, event=event,
-                    delivered=delivered, webhook_url=webhook_url() or "",
+                    delivered=delivered, webhook_url=webhook_url(user_id=env.user_id) or "",
                 ))
                 logger.info(f"[{env.name}] SLA alert {event} for {run.dag_id}/{run.run_id}: {delivered}")
 
@@ -478,17 +569,6 @@ def _maybe_generate_scheduled_report():
         import reports as reports_lib
         from settings import get_gemini_config
 
-        # Build Gemini handle once per cycle (shared across envs)
-        gemini_handle = None
-        api_key, model = get_gemini_config()
-        if api_key:
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=api_key)
-                gemini_handle = genai.GenerativeModel(model)
-            except Exception as e:
-                logger.warning(f"Could not init Gemini for scheduled report: {e}")
-
         for env in envs:
             s = db.query(ReportSchedule).filter(
                 ReportSchedule.user_id == env.user_id,
@@ -496,6 +576,17 @@ def _maybe_generate_scheduled_report():
             ).first()
             if s is None or not _is_schedule_due(s, now):
                 continue
+
+            # Build Gemini handle per env so each user's API key is used.
+            gemini_handle = None
+            api_key, model = get_gemini_config(user_id=env.user_id)
+            if api_key:
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=api_key)
+                    gemini_handle = genai.GenerativeModel(model)
+                except Exception as e:
+                    logger.warning(f"[{env.name}] Could not init Gemini for scheduled report: {e}")
 
             data = reports_lib.gather_report_data(db, env, s.range)
             if gemini_handle is not None:
@@ -519,7 +610,7 @@ def _maybe_generate_scheduled_report():
                 env, row.id, range_label, summary, override_url=s.webhook_url,
             )
             row.delivered = delivered
-            row.webhook_url = s.webhook_url or webhook_url() or ""
+            row.webhook_url = s.webhook_url or webhook_url(user_id=env.user_id) or ""
             s.last_sent_at = now
             db.commit()
             logger.info(f"[{env.name}] Scheduled report #{row.id} generated and notified: {delivered}")
@@ -531,16 +622,11 @@ def _maybe_generate_scheduled_report():
 
 
 def start_scheduler():
-    from settings import get_setting
+    """Boot the APScheduler and register every per-user sync job, plus the two
+    global jobs (SLA breach check, scheduled report check)."""
     scheduler = BackgroundScheduler()
-    initial_interval = int(get_setting("sync_interval_minutes", cast=int))
-    scheduler.add_job(
-        sync_airflow_data,
-        "interval",
-        minutes=initial_interval,
-        id="sync_airflow_data",
-        replace_existing=True,
-    )
+    # Global jobs: iterate over all users on each tick, but the per-tenant
+    # work happens inside.
     scheduler.add_job(
         _maybe_generate_scheduled_report,
         "interval",
@@ -556,5 +642,16 @@ def start_scheduler():
         replace_existing=True,
     )
     scheduler.start()
-    sync_airflow_data()
+
+    # Register a sync job for every existing user with at least one env.
+    # New users get their job registered on signup (see main.py wiring).
+    register_all_user_sync_jobs(scheduler)
+
+    # Run an immediate sync once on startup so a freshly-rebuilt backend doesn't
+    # wait for the first interval tick.
+    try:
+        sync_airflow_data()
+    except Exception as e:
+        logger.warning(f"Initial bootstrap sync failed: {e}")
+
     return scheduler

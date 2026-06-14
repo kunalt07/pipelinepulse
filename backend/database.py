@@ -157,6 +157,9 @@ def run_migrations():
     # ---------- Multi-tenant migration: user_id on env-scoped tables ----------
     _run_multitenant_migration()
 
+    # ---------- Settings table: owner_user_id for per-user scoping ----------
+    _migrate_settings_per_user()
+
 
 def _run_multitenant_migration() -> None:
     """Add user_id to every env-scoped table. Backfill all existing rows to the
@@ -235,6 +238,107 @@ def _run_multitenant_migration() -> None:
                 logger.debug(f"multitenant migration skipped: {stmt[:60]}... — {e}")
 
     logger.info(f"Multi-tenant migration: backfilled all rows to user_id={target_user_id}")
+
+
+# Settings keys that move per-user (Session 3). All others stay global with
+# owner_user_id = 0 sentinel.
+PER_USER_SETTING_KEYS = {
+    "webhook_url",
+    "gemini_api_key",
+    "gemini_model",
+    "sync_interval_minutes",
+}
+
+
+def _migrate_settings_per_user() -> None:
+    """Add owner_user_id to settings table; backfill existing per-user-scoped
+    keys to user 1 (the admin); leave global keys with owner_user_id = 0.
+
+    Also seeds admin's per-user rows from the legacy AUTH_USER/AUTH_PASS-style
+    env vars (WEBHOOK_URL, GEMINI_API_KEY) so admin's pre-tenancy setup keeps
+    working. New users won't inherit these values — get_setting's per-user
+    rule blocks env-var fallback for non-global lookups.
+
+    Idempotent. Re-running on an already-migrated DB is a no-op for the column
+    add; UPDATEs only touch rows still NULL; seeding skips rows that already exist.
+    """
+    from sqlalchemy import text
+    from datetime import datetime as _dt
+
+    target_user_id = _lowest_user_id()
+
+    with engine.begin() as conn:
+        try:
+            conn.execute(text(
+                "ALTER TABLE settings ADD COLUMN IF NOT EXISTS owner_user_id INTEGER"
+            ))
+        except Exception as e:
+            logger.debug(f"settings owner_user_id add skipped: {e}")
+
+        # Backfill: per-user keys go to admin (if exists), global keys go to 0.
+        if target_user_id is not None:
+            keys_csv = ", ".join(f"'{k}'" for k in PER_USER_SETTING_KEYS)
+            try:
+                conn.execute(text(f"""
+                    UPDATE settings SET owner_user_id = {target_user_id}
+                    WHERE owner_user_id IS NULL AND key IN ({keys_csv})
+                """))
+            except Exception as e:
+                logger.debug(f"settings per-user backfill skipped: {e}")
+
+        # Anything still NULL becomes global (sentinel = 0).
+        try:
+            conn.execute(text(
+                "UPDATE settings SET owner_user_id = 0 WHERE owner_user_id IS NULL"
+            ))
+        except Exception as e:
+            logger.debug(f"settings global backfill skipped: {e}")
+
+        # Now make it NOT NULL and swap the PK from `key` to `(owner_user_id, key)`.
+        for stmt in [
+            "ALTER TABLE settings ALTER COLUMN owner_user_id SET NOT NULL",
+            "ALTER TABLE settings DROP CONSTRAINT IF EXISTS settings_pkey",
+            "ALTER TABLE settings ADD PRIMARY KEY (owner_user_id, key)",
+        ]:
+            try:
+                conn.execute(text(stmt))
+            except Exception as e:
+                logger.debug(f"settings PK swap skipped: {stmt[:60]}... — {e}")
+
+        # Seed admin's per-user rows from env vars if they're set and admin
+        # doesn't already have an explicit row. After this, admin's webhook etc.
+        # comes from their per-user row (not the env-var fallback), and new
+        # users won't inherit it.
+        if target_user_id is not None:
+            for setting_key, env_var in [
+                ("webhook_url", "WEBHOOK_URL"),
+                ("gemini_api_key", "GEMINI_API_KEY"),
+                ("gemini_model", "GEMINI_MODEL"),
+            ]:
+                env_val = (os.getenv(env_var) or "").strip()
+                if not env_val:
+                    continue
+                try:
+                    existing = conn.execute(text(
+                        "SELECT 1 FROM settings WHERE owner_user_id = :uid AND key = :key"
+                    ), {"uid": target_user_id, "key": setting_key}).first()
+                    if existing:
+                        continue
+                    conn.execute(text("""
+                        INSERT INTO settings (owner_user_id, key, value, updated_at)
+                        VALUES (:uid, :key, :val, :now)
+                    """), {
+                        "uid": target_user_id,
+                        "key": setting_key,
+                        "val": env_val,
+                        "now": _dt.utcnow(),
+                    })
+                    logger.info(
+                        f"Seeded admin's {setting_key} from {env_var} env var "
+                        "(per-user, won't be inherited by new signups)"
+                    )
+                except Exception as e:
+                    logger.debug(f"admin seed for {setting_key} skipped: {e}")
 
 
 def _lowest_user_id() -> int | None:

@@ -19,10 +19,13 @@ import requests
 logger = logging.getLogger(__name__)
 
 
-def webhook_url() -> Optional[str]:
-    # Settings table overrides env at runtime; helper falls through to env on unset.
+def webhook_url(user_id: Optional[int] = None) -> Optional[str]:
+    """Look up the webhook URL for a specific user (or global fallback if not given).
+
+    Settings table overrides env at runtime; helper falls through to env on unset.
+    """
     from settings import get_webhook_url
-    return get_webhook_url()
+    return get_webhook_url(user_id=user_id)
 
 
 def airflow_run_url(env, dag_id: str, run_id: str) -> Optional[str]:
@@ -55,7 +58,7 @@ def build_failure_payload(env, dag_id: str, run_id: str, error_snippet: Optional
 
 
 def send_failure_alert(env, dag_id: str, run_id: str, error_snippet: Optional[str] = None) -> str:
-    url = webhook_url()
+    url = webhook_url(user_id=getattr(env, "user_id", None))
     if not url:
         return "skipped"
     payload = build_failure_payload(env, dag_id, run_id, error_snippet)
@@ -111,7 +114,7 @@ def build_sla_payload(env, dag_id: str, run_id: str, kind: str, message: str) ->
 
 
 def send_sla_alert(env, dag_id: str, run_id: str, kind: str, message: str) -> str:
-    url = webhook_url()
+    url = webhook_url(user_id=getattr(env, "user_id", None))
     if not url:
         return "skipped"
     payload = build_sla_payload(env, dag_id, run_id, kind, message)
@@ -132,7 +135,7 @@ def send_report_notification(
     summary_line: str,
     override_url: Optional[str] = None,
 ) -> str:
-    url = (override_url or "").strip() or webhook_url()
+    url = (override_url or "").strip() or webhook_url(user_id=getattr(env, "user_id", None))
     if not url:
         return "skipped"
     payload = build_report_payload(env, report_id, range_label, summary_line)

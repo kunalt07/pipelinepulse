@@ -9,13 +9,51 @@ are included for traceability.
 
 ## [Unreleased]
 
-### Planned (Session 3)
-- Per-user APScheduler sync jobs (one per user, registered on signup,
-  rescheduled when their `sync_interval_minutes` changes)
-- Per-user settings: `webhook_url`, `gemini_api_key`, `gemini_model`,
-  `sync_interval_minutes` move per-user; stuck-run thresholds stay global
-- Rate limiting on `/auth/login` + `/auth/signup` via slowapi
-- README pivot to SaaS positioning
+### Planned
+- (No specific roadmap items at the moment. Session 3 closed out the
+  multi-tenant rebuild. Possible Session 4: SaaS infra — domain, HTTPS,
+  production DB, backups, Sentry, password-reset email — mostly config.)
+
+---
+
+## 2026-06-14 — Multi-tenant rebuild, Session 3
+
+### Added
+- **Per-user APScheduler sync jobs.** Each user with at least one env gets
+  their own `sync_user_<id>` job. Registered on first env creation,
+  removed on last env deletion, rescheduled live when the user changes
+  their `sync_interval_minutes`. Two users can sync at different cadences.
+- **Per-user settings.** `webhook_url`, `gemini_api_key`, `gemini_model`,
+  `sync_interval_minutes` are now per-user. Stuck-run thresholds stay
+  global. `settings` table gains an `owner_user_id` column with `0` as
+  the global sentinel; PK swaps to `(owner_user_id, key)`.
+- **Strict per-user resolution rule.** New users do NOT inherit env-var
+  webhook/Gemini values. The migration seeds admin's per-user rows from
+  the existing env vars so admin's setup keeps working — but signup of
+  a new user gives them blank settings, so they don't accidentally fire
+  alerts to admin's Discord.
+- **Rate limiting on auth.** `slowapi` per-IP limits: `/auth/login` 5/min,
+  `/auth/signup` 3/hour. Verified via 6-rapid-attempts test → 6th request
+  returns 429.
+
+### Changed
+- README repositions PipelinePulse as a multi-tenant SaaS (or self-host).
+  New "Multi-tenant accounts", "First-run wizard", "Per-user sync",
+  "Rate limiting" features called out in the auth section.
+- Webhook delivery (`notifier.send_failure_alert`, `send_sla_alert`,
+  `send_report_notification`) now resolves the URL per env's owning user.
+- AI Gemini handle now built per env so each user's API key is used.
+- The `/settings` GET/PUT endpoints scope reads + writes to the current
+  user's row (per-user keys) or the global sentinel row (global keys).
+
+### Verified end-to-end
+- Admin's sync interval = 2 min; Alice's = 5 min; backend logs confirm
+  independent reschedule. `settings.user_id=5` row exists post-change.
+- Alice's `webhook_url` shows `set: false` despite the env-var being set
+  — proving the no-inherit rule works.
+- 6 rapid login attempts returns 429 on the 6th.
+
+Commit: forthcoming
 
 ---
 

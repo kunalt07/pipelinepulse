@@ -5,12 +5,16 @@ from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from starlette.responses import JSONResponse
 from sqlalchemy.orm import Session
 from database import get_db, engine, run_migrations
 from models import Base, DAGRun, TaskInstance, AIInsight, Notification, DagAlertConfig, ReportRun, ReportSchedule, RunAnnotation, DagSlaConfig, Environment, User, UserSession, ApiToken
 import sla as sla_lib
 from notifier import send_failure_alert, webhook_url
-from scheduler import start_scheduler, resync_run
+from scheduler import start_scheduler, resync_run, register_user_sync_job, remove_user_sync_job
 from airflow_client import get_task_logs, trigger_dag_run, get_dags as _airflow_get_dags, probe as _airflow_probe
 import reports as reports_lib
 import google.generativeai as genai
@@ -37,9 +41,10 @@ run_migrations()
 _gemini_cache: dict[tuple[str, str], "genai.GenerativeModel"] = {}
 
 
-def get_gemini():
-    """Returns a configured GenerativeModel or None when no key is available."""
-    api_key, model = get_gemini_config()
+def get_gemini(user_id: Optional[int] = None):
+    """Returns a configured GenerativeModel for the given user (or global fallback
+    if not given). Returns None when no API key is available."""
+    api_key, model = get_gemini_config(user_id=user_id)
     if not api_key:
         return None
     cache_key = (api_key, model)
@@ -52,11 +57,26 @@ def get_gemini():
     return _gemini_cache[cache_key]
 
 
-def gemini_enabled() -> bool:
-    api_key, _ = get_gemini_config()
+def gemini_enabled(user_id: Optional[int] = None) -> bool:
+    api_key, _ = get_gemini_config(user_id=user_id)
     return bool(api_key)
 
 app = FastAPI(title="PipelinePulse API")
+
+# Rate limiter for auth endpoints. In-memory, per-IP. Resets on backend
+# restart. A single backend instance is enough for the kind of brute-force
+# protection we care about; behind a reverse proxy you'd back this with Redis.
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+def _rate_limit_exceeded_handler(_request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": f"Too many requests. {exc.detail}"},
+    )
+
 
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 app.add_middleware(
@@ -161,9 +181,10 @@ def _serialize_user(u: User) -> dict:
 
 
 @app.post("/auth/signup")
+@limiter.limit("3/hour")  # avoid bot-fueled signup floods
 def signup(
-    body: SignupRequest,
     request: Request,
+    body: SignupRequest,
     response: Response,
     db: Session = Depends(get_db),
 ):
@@ -188,9 +209,10 @@ def signup(
 
 
 @app.post("/auth/login")
+@limiter.limit("5/minute")  # blocks scripted password-spray attempts
 def login(
-    body: LoginRequest,
     request: Request,
+    body: LoginRequest,
     response: Response,
     db: Session = Depends(get_db),
 ):
@@ -366,7 +388,7 @@ def list_notifications(
         .all()
     )
     return {
-        "configured": webhook_url() is not None,
+        "configured": webhook_url(user_id=user.id) is not None,
         "notifications": [
             {
                 "id": n.id,
@@ -387,8 +409,12 @@ def test_notification(
     db: Session = Depends(get_db),
     user: User = Depends(require_auth),
 ):
-    if not webhook_url():
-        raise HTTPException(status_code=400, detail="WEBHOOK_URL is not configured")
+    user_webhook = webhook_url(user_id=user.id)
+    if not user_webhook:
+        raise HTTPException(
+            status_code=400,
+            detail="No webhook configured. Set one in Settings → Integrations.",
+        )
     delivered = send_failure_alert(
         env,
         "pipelinepulse_test",
@@ -398,7 +424,7 @@ def test_notification(
     db.add(Notification(
         user_id=user.id, environment_id=env.id,
         dag_id="pipelinepulse_test", run_id="test_run", event="test",
-        delivered=delivered, webhook_url=webhook_url() or "",
+        delivered=delivered, webhook_url=user_webhook,
     ))
     db.commit()
     return {"delivered": delivered}
@@ -1154,7 +1180,7 @@ def explain_failure(
     db: Session = Depends(get_db),
     user: User = Depends(require_auth),
 ):
-    gemini = get_gemini()
+    gemini = get_gemini(user_id=user.id)
     if gemini is None:
         return {"insight": "AI features are disabled. Set GEMINI_API_KEY in your .env or via Settings to enable."}
 
@@ -1224,7 +1250,7 @@ def stakeholder_summary(
     db: Session = Depends(get_db),
     user: User = Depends(require_auth),
 ):
-    gemini = get_gemini()
+    gemini = get_gemini(user_id=user.id)
     if gemini is None:
         return {"summary": "AI features are disabled. Set GEMINI_API_KEY in your .env or via Settings to enable."}
 
@@ -1333,6 +1359,11 @@ def create_environment(
     db.add(env)
     db.commit()
     db.refresh(env)
+
+    # First env for this user → register their per-user sync job. Idempotent
+    # (replace_existing=True) so this is also safe to call when adding a 2nd env.
+    register_user_sync_job(scheduler, user.id)
+
     return _serialize_env(env)
 
 
@@ -1443,6 +1474,13 @@ def delete_environment(
                 deleted_counts[name] = n
     db.delete(env)
     db.commit()
+
+    # If that was the user's last env, deregister their sync job so we don't
+    # tick uselessly. APScheduler removes the job; settings hooks find none.
+    remaining = db.query(Environment).filter(Environment.user_id == user.id).count()
+    if remaining == 0:
+        remove_user_sync_job(scheduler, user.id)
+
     return {"deleted": True, "id": env_id, "cascaded": deleted_counts}
 
 
@@ -1494,12 +1532,15 @@ REPORT_MEDIA_TYPES = {
 
 
 def _build_report(db: Session, env: Environment, range_: str, with_ai: bool = True) -> dict:
-    """Gather data + (optionally) attach AI narrative."""
+    """Gather data + (optionally) attach AI narrative.
+
+    Gemini is looked up using env.user_id so each user's API key is used.
+    """
     if range_ not in reports_lib.REPORT_RANGES:
         raise HTTPException(status_code=400, detail="range must be 7d or 30d")
     data = reports_lib.gather_report_data(db, env, range_)
     if with_ai:
-        gemini = get_gemini()
+        gemini = get_gemini(user_id=env.user_id)
         if gemini is not None:
             data["ai_narrative"] = reports_lib.generate_ai_narrative(data, gemini)
     return data
@@ -1744,32 +1785,43 @@ def _validate_setting(key: str, raw):
     return value
 
 
-def _serialize_settings() -> dict:
-    """Returns full settings snapshot. Secrets reveal only set/unset state."""
+def _serialize_settings(user_id: int) -> dict:
+    """Returns full settings snapshot for the given user.
+
+    Per-user keys (webhook_url, gemini_api_key, gemini_model, sync_interval_minutes)
+    return that user's row (with global-sentinel + env-var fallback per get_setting).
+    Global keys (stuck-run thresholds) return the shared row regardless of user.
+    """
     out: dict = {}
     for key in settings_lib.DEFAULTS.keys():
         if key in settings_lib.SECRET_KEYS:
             out[key] = {
-                "set": settings_lib.is_set(key),
-                "db_override": settings_lib.is_db_set(key),
+                "set": settings_lib.is_set(key, user_id=user_id),
+                "db_override": settings_lib.is_db_set(key, user_id=user_id),
             }
         else:
             out[key] = settings_lib.get_setting(
                 key,
                 cast=SETTING_VALIDATORS.get(key, {}).get("type"),
+                user_id=user_id,
             )
     return out
 
 
 @app.get("/settings")
 def read_settings(user: User = Depends(require_auth)):
-    return _serialize_settings()
+    return _serialize_settings(user_id=user.id)
 
 
 @app.put("/settings")
 def write_settings(body: dict, user: User = Depends(require_auth)):
     """Bulk upsert. For secrets: omit the key to leave alone, send null to clear,
-    send a string to set. For non-secrets: send the new value, or empty string / null to reset."""
+    send a string to set. For non-secrets: send the new value, or empty string / null to reset.
+
+    Per-user keys persist to the current user's settings row; global keys
+    (stuck-run thresholds) write to the shared sentinel row regardless of who
+    posted the change. (A future tweak might gate global writes on is_admin.)
+    """
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Body must be a JSON object")
 
@@ -1778,19 +1830,19 @@ def write_settings(body: dict, user: User = Depends(require_auth)):
         if key not in SETTING_VALIDATORS:
             raise HTTPException(status_code=400, detail=f"Unknown setting: {key}")
         if raw is None or (isinstance(raw, str) and raw.strip() == ""):
-            settings_lib.clear_setting(key)
+            settings_lib.clear_setting(key, user_id=user.id)
         else:
             value = _validate_setting(key, raw)
-            settings_lib.set_setting(key, value)
+            settings_lib.set_setting(key, value, user_id=user.id)
         if key == "sync_interval_minutes":
             needs_reschedule = True
 
     # _on_change handles reschedule, but note it explicitly in logs for visibility.
     if needs_reschedule:
         import logging as _logging
-        _logging.getLogger(__name__).info("Sync interval setting changed")
+        _logging.getLogger(__name__).info(f"Sync interval changed for user_id={user.id}")
 
-    return _serialize_settings()
+    return _serialize_settings(user_id=user.id)
 
 
 class ProbeWebhookRequest(BaseModel):
