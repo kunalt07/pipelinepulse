@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
-import { api, UnauthorizedError, type CurrentUser } from "@/lib/api";
+import { api, setActiveEnvUser, UnauthorizedError, type CurrentUser } from "@/lib/api";
 
 type AuthState =
   | { status: "loading" }
@@ -29,12 +29,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refresh = useCallback(async () => {
     try {
       const user = await api.authMe();
+      // Migrate the active-env localStorage to the user-scoped key. Multi-tenant
+      // means two users on the same browser must not share each other's env
+      // selection.
+      setActiveEnvUser(user.id);
       setState({ status: "authenticated", user });
     } catch (e) {
       if (e instanceof UnauthorizedError) {
+        setActiveEnvUser(null);
         setState({ status: "unauthenticated" });
       } else {
-        // Other errors (network, 5xx): treat as unauthenticated so user can retry.
+        setActiveEnvUser(null);
         setState({ status: "unauthenticated" });
       }
     }
@@ -46,6 +51,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // ignore — proceed with client-side logout regardless
     }
+    setActiveEnvUser(null);
     setState({ status: "unauthenticated" });
     router.push("/login");
   }, [router]);

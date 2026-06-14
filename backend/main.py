@@ -16,7 +16,9 @@ import reports as reports_lib
 import google.generativeai as genai
 from dotenv import load_dotenv
 from settings import get_gemini_config, get_setting, register_scheduler as register_settings_scheduler
-from environment import env_dep, list_environments, get_env
+from environment import (
+    env_dep, get_user_env, list_user_environments, list_all_environments,
+)
 from auth import (
     SESSION_COOKIE_NAME, SESSION_DURATION,
     hash_password, verify_password,
@@ -276,7 +278,7 @@ def revoke_token(
 
 
 @app.get("/dags")
-def list_dags(env: Environment = Depends(env_dep), _: str = Depends(require_auth)):
+def list_dags(env: Environment = Depends(env_dep), user: User = Depends(require_auth)):
     return {"dags": _airflow_get_dags(env)}
 
 RANGE_HOURS = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
@@ -289,9 +291,10 @@ def dag_runs(
     range: str = "all",
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     q = db.query(DAGRun).filter(
+        DAGRun.user_id == user.id,
         DAGRun.environment_id == env.id,
         DAGRun.dag_id == dag_id,
     )
@@ -319,12 +322,13 @@ def task_instances(
     run_id: str,
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     tasks = (
         db.query(TaskInstance)
         .filter(
-            TaskInstance.environment_id == env.id,
+            TaskInstance.user_id == user.id,
+        TaskInstance.environment_id == env.id,
             TaskInstance.dag_id == dag_id,
             TaskInstance.run_id == run_id,
         )
@@ -352,11 +356,11 @@ def list_notifications(
     limit: int = 30,
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     rows = (
         db.query(Notification)
-        .filter(Notification.environment_id == env.id)
+        .filter(Notification.user_id == user.id, Notification.environment_id == env.id)
         .order_by(Notification.created_at.desc())
         .limit(limit)
         .all()
@@ -381,7 +385,7 @@ def list_notifications(
 def test_notification(
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     if not webhook_url():
         raise HTTPException(status_code=400, detail="WEBHOOK_URL is not configured")
@@ -392,7 +396,7 @@ def test_notification(
         "This is a test alert from PipelinePulse — your webhook is working.",
     )
     db.add(Notification(
-        environment_id=env.id,
+        user_id=user.id, environment_id=env.id,
         dag_id="pipelinepulse_test", run_id="test_run", event="test",
         delivered=delivered, webhook_url=webhook_url() or "",
     ))
@@ -432,7 +436,7 @@ def _serialize_config(cfg: Optional[DagAlertConfig], dag_id: str) -> dict:
 def list_alert_configs(
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     """Return alert configs for every known DAG in the env; missing rows yield defaults."""
     try:
@@ -441,7 +445,7 @@ def list_alert_configs(
         dag_ids = []
     existing = {
         c.dag_id: c
-        for c in db.query(DagAlertConfig).filter(DagAlertConfig.environment_id == env.id).all()
+        for c in db.query(DagAlertConfig).filter(DagAlertConfig.user_id == user.id, DagAlertConfig.environment_id == env.id).all()
     }
     for dag_id in existing.keys():
         if dag_id not in dag_ids:
@@ -455,7 +459,7 @@ def upsert_alert_config(
     body: AlertConfigUpdate,
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     if body.quiet_hours_start or body.quiet_hours_end:
         for label, val in (("start", body.quiet_hours_start), ("end", body.quiet_hours_end)):
@@ -469,11 +473,12 @@ def upsert_alert_config(
                 raise HTTPException(status_code=400, detail=f"quiet_hours_{label} must be HH:MM")
 
     cfg = db.query(DagAlertConfig).filter(
+        DagAlertConfig.user_id == user.id,
         DagAlertConfig.environment_id == env.id,
         DagAlertConfig.dag_id == dag_id,
     ).first()
     if cfg is None:
-        cfg = DagAlertConfig(environment_id=env.id, dag_id=dag_id)
+        cfg = DagAlertConfig(user_id=user.id, environment_id=env.id, dag_id=dag_id)
         db.add(cfg)
     cfg.muted = body.muted
     cfg.min_consecutive_failures = body.min_consecutive_failures
@@ -516,7 +521,7 @@ def _serialize_sla(cfg: Optional[DagSlaConfig], dag_id: str) -> dict:
 def list_sla_configs(
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     """One row per known DAG in env; missing rows yield disabled defaults."""
     try:
@@ -525,7 +530,7 @@ def list_sla_configs(
         dag_ids = []
     existing = {
         c.dag_id: c
-        for c in db.query(DagSlaConfig).filter(DagSlaConfig.environment_id == env.id).all()
+        for c in db.query(DagSlaConfig).filter(DagSlaConfig.user_id == user.id, DagSlaConfig.environment_id == env.id).all()
     }
     for dag_id in existing.keys():
         if dag_id not in dag_ids:
@@ -539,7 +544,7 @@ def upsert_sla_config(
     body: SlaConfigUpdate,
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     if body.deadline_time:
         try:
@@ -550,11 +555,12 @@ def upsert_sla_config(
             raise HTTPException(status_code=400, detail="deadline_time must be HH:MM")
 
     cfg = db.query(DagSlaConfig).filter(
+        DagSlaConfig.user_id == user.id,
         DagSlaConfig.environment_id == env.id,
         DagSlaConfig.dag_id == dag_id,
     ).first()
     if cfg is None:
-        cfg = DagSlaConfig(environment_id=env.id, dag_id=dag_id)
+        cfg = DagSlaConfig(user_id=user.id, environment_id=env.id, dag_id=dag_id)
         db.add(cfg)
     cfg.enabled = body.enabled
     cfg.deadline_time = body.deadline_time or None
@@ -569,11 +575,12 @@ def upsert_sla_config(
 def sla_at_risk(
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     """DAGs whose deadline is within 60 min and don't have a success yet."""
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     configs = db.query(DagSlaConfig).filter(
+        DagSlaConfig.user_id == user.id,
         DagSlaConfig.environment_id == env.id,
         DagSlaConfig.enabled.is_(True),
     ).all()
@@ -584,7 +591,8 @@ def sla_at_risk(
         last_run = (
             db.query(DAGRun)
             .filter(
-                DAGRun.environment_id == env.id,
+                DAGRun.user_id == user.id,
+        DAGRun.environment_id == env.id,
                 DAGRun.dag_id == cfg.dag_id,
                 DAGRun.start_date.isnot(None),
             )
@@ -602,7 +610,7 @@ def sla_breaches(
     range: str = "7d",
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     """All runs in the window that breached SLA. Used for table badges + reports."""
     if range not in {"24h", "7d", "30d"}:
@@ -614,7 +622,8 @@ def sla_breaches(
     configs = {
         c.dag_id: c
         for c in db.query(DagSlaConfig).filter(
-            DagSlaConfig.environment_id == env.id,
+            DagSlaConfig.user_id == user.id,
+        DagSlaConfig.environment_id == env.id,
             DagSlaConfig.enabled.is_(True),
         ).all()
     }
@@ -624,7 +633,8 @@ def sla_breaches(
     runs = (
         db.query(DAGRun)
         .filter(
-            DAGRun.environment_id == env.id,
+            DAGRun.user_id == user.id,
+        DAGRun.environment_id == env.id,
             DAGRun.dag_id.in_(list(configs.keys())),
             DAGRun.start_date.isnot(None),
             DAGRun.start_date >= cutoff,
@@ -655,7 +665,7 @@ def resync(
     dag_id: str,
     run_id: str,
     env: Environment = Depends(env_dep),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     return resync_run(env, dag_id, run_id)
 
@@ -668,7 +678,7 @@ def run_diff(
     baseline_run_id: Optional[str] = None,
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     """Compare two runs' tasks within the active env.
 
@@ -677,6 +687,7 @@ def run_diff(
     The two halves can come from different DAGs (within the same env) — task overlap is by task_id.
     """
     current = db.query(DAGRun).filter(
+        DAGRun.user_id == user.id,
         DAGRun.environment_id == env.id,
         DAGRun.dag_id == dag_id,
         DAGRun.run_id == run_id,
@@ -687,7 +698,8 @@ def run_diff(
     explicit_baseline = bool(baseline_dag_id and baseline_run_id)
     if explicit_baseline:
         baseline = db.query(DAGRun).filter(
-            DAGRun.environment_id == env.id,
+            DAGRun.user_id == user.id,
+        DAGRun.environment_id == env.id,
             DAGRun.dag_id == baseline_dag_id,
             DAGRun.run_id == baseline_run_id,
         ).first()
@@ -696,7 +708,8 @@ def run_diff(
         baseline_kind = "explicit"
     else:
         baseline_q = db.query(DAGRun).filter(
-            DAGRun.environment_id == env.id,
+            DAGRun.user_id == user.id,
+        DAGRun.environment_id == env.id,
             DAGRun.dag_id == dag_id,
             DAGRun.state == "success",
             DAGRun.run_id != run_id,
@@ -720,10 +733,12 @@ def run_diff(
         }
 
     cur_tasks = {t.task_id: t for t in db.query(TaskInstance).filter(
+        TaskInstance.user_id == user.id,
         TaskInstance.environment_id == env.id,
         TaskInstance.dag_id == dag_id, TaskInstance.run_id == run_id,
     ).all()}
     base_tasks = {t.task_id: t for t in db.query(TaskInstance).filter(
+        TaskInstance.user_id == user.id,
         TaskInstance.environment_id == env.id,
         TaskInstance.dag_id == baseline.dag_id, TaskInstance.run_id == baseline.run_id,
     ).all()}
@@ -793,9 +808,10 @@ def get_annotation(
     run_id: str,
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     row = db.query(RunAnnotation).filter(
+        RunAnnotation.user_id == user.id,
         RunAnnotation.environment_id == env.id,
         RunAnnotation.dag_id == dag_id,
         RunAnnotation.run_id == run_id,
@@ -817,10 +833,11 @@ def upsert_annotation(
     body: AnnotationUpdate,
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     note = body.note.strip()
     row = db.query(RunAnnotation).filter(
+        RunAnnotation.user_id == user.id,
         RunAnnotation.environment_id == env.id,
         RunAnnotation.dag_id == dag_id,
         RunAnnotation.run_id == run_id,
@@ -832,7 +849,7 @@ def upsert_annotation(
             db.commit()
         return {"dag_id": dag_id, "run_id": run_id, "note": "", "updated_at": None}
     if row is None:
-        row = RunAnnotation(environment_id=env.id, dag_id=dag_id, run_id=run_id, note=note)
+        row = RunAnnotation(user_id=user.id, environment_id=env.id, dag_id=dag_id, run_id=run_id, note=note)
         db.add(row)
     else:
         row.note = note
@@ -851,10 +868,10 @@ def list_annotations(
     dag_id: Optional[str] = None,
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     """Bulk-fetch annotations so the runs table can show badges in one round-trip."""
-    q = db.query(RunAnnotation).filter(RunAnnotation.environment_id == env.id)
+    q = db.query(RunAnnotation).filter(RunAnnotation.user_id == user.id, RunAnnotation.environment_id == env.id)
     if dag_id:
         q = q.filter(RunAnnotation.dag_id == dag_id)
     rows = q.order_by(RunAnnotation.updated_at.desc()).limit(500).all()
@@ -875,7 +892,7 @@ def list_annotations(
 def trigger_run(
     dag_id: str,
     env: Environment = Depends(env_dep),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     try:
         result = trigger_dag_run(env, dag_id)
@@ -895,7 +912,7 @@ def task_logs(
     task_id: str,
     attempt: int = 1,
     env: Environment = Depends(env_dep),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     try:
         text = get_task_logs(env, dag_id, run_id, task_id, attempt=attempt)
@@ -922,13 +939,14 @@ def _percentile(values: list[float], pct: float) -> float:
 def stuck_runs(
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     """Currently-running DAG runs whose elapsed time exceeds 2× p95 of past successes."""
     running = (
         db.query(DAGRun)
         .filter(
-            DAGRun.environment_id == env.id,
+            DAGRun.user_id == user.id,
+        DAGRun.environment_id == env.id,
             DAGRun.state == "running",
             DAGRun.start_date.isnot(None),
         )
@@ -950,7 +968,8 @@ def stuck_runs(
             durations = [
                 d for (d,) in db.query(DAGRun.duration_seconds)
                 .filter(
-                    DAGRun.environment_id == env.id,
+                    DAGRun.user_id == user.id,
+        DAGRun.environment_id == env.id,
                     DAGRun.dag_id == r.dag_id,
                     DAGRun.state == "success",
                     DAGRun.duration_seconds.isnot(None),
@@ -990,7 +1009,7 @@ def analytics(
     range: str = "7d",
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     if range not in ANALYTICS_RANGES:
         raise HTTPException(status_code=400, detail="range must be 7d or 30d")
@@ -1001,7 +1020,8 @@ def analytics(
 
     def window(start, end):
         return db.query(DAGRun).filter(
-            DAGRun.environment_id == env.id,
+            DAGRun.user_id == user.id,
+        DAGRun.environment_id == env.id,
             DAGRun.start_date.isnot(None),
             DAGRun.start_date >= start,
             DAGRun.start_date < end,
@@ -1111,9 +1131,9 @@ def range_iter():
 def pipeline_summary(
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
-    base = db.query(DAGRun).filter(DAGRun.environment_id == env.id)
+    base = db.query(DAGRun).filter(DAGRun.user_id == user.id, DAGRun.environment_id == env.id)
     total = base.count()
     success = base.filter(DAGRun.state == "success").count()
     failed = base.filter(DAGRun.state == "failed").count()
@@ -1132,13 +1152,14 @@ def explain_failure(
     run_id: str,
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     gemini = get_gemini()
     if gemini is None:
         return {"insight": "AI features are disabled. Set GEMINI_API_KEY in your .env or via Settings to enable."}
 
     tasks = db.query(TaskInstance).filter(
+        TaskInstance.user_id == user.id,
         TaskInstance.environment_id == env.id,
         TaskInstance.dag_id == dag_id,
         TaskInstance.run_id == run_id,
@@ -1183,7 +1204,7 @@ Keep it concise and actionable.
         insight_text = response.text
 
         insight = AIInsight(
-            environment_id=env.id,
+            user_id=user.id, environment_id=env.id,
             dag_id=dag_id,
             run_id=run_id,
             insight_type="failure_explanation",
@@ -1201,13 +1222,14 @@ def stakeholder_summary(
     dag_id: str,
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     gemini = get_gemini()
     if gemini is None:
         return {"summary": "AI features are disabled. Set GEMINI_API_KEY in your .env or via Settings to enable."}
 
     runs = db.query(DAGRun).filter(
+        DAGRun.user_id == user.id,
         DAGRun.environment_id == env.id,
         DAGRun.dag_id == dag_id,
     ).order_by(DAGRun.synced_at.desc()).limit(10).all()
@@ -1273,20 +1295,27 @@ def _serialize_env(env: Environment) -> dict:
 
 
 @app.get("/environments")
-def get_environments(db: Session = Depends(get_db), _: str = Depends(require_auth)):
-    return {"environments": [_serialize_env(e) for e in list_environments(db)]}
+def get_environments(
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    return {"environments": [_serialize_env(e) for e in list_user_environments(db, user)]}
 
 
 @app.post("/environments")
 def create_environment(
     body: EnvironmentCreate,
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
-    if db.query(Environment).filter(Environment.name == body.name).first():
+    # Name uniqueness is per-user post multi-tenant migration.
+    if db.query(Environment).filter(
+        Environment.user_id == user.id, Environment.name == body.name
+    ).first():
         raise HTTPException(status_code=400, detail=f"Environment '{body.name}' already exists")
 
     env = Environment(
+        user_id=user.id,
         name=body.name,
         airflow_base_url=body.airflow_base_url.strip(),
         airflow_username=(body.airflow_username or "").strip() or None,
@@ -1295,8 +1324,10 @@ def create_environment(
         enabled=body.enabled,
     )
     if body.is_default:
-        # Flip any existing defaults off
-        for other in db.query(Environment).filter(Environment.is_default.is_(True)).all():
+        # Flip THIS user's other defaults off (other users' is_default flags untouched).
+        for other in db.query(Environment).filter(
+            Environment.user_id == user.id, Environment.is_default.is_(True)
+        ).all():
             other.is_default = False
         env.is_default = True
     db.add(env)
@@ -1310,14 +1341,18 @@ def update_environment(
     env_id: int,
     body: EnvironmentUpdate,
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
-    env = db.query(Environment).filter(Environment.id == env_id).first()
+    env = db.query(Environment).filter(
+        Environment.user_id == user.id, Environment.id == env_id
+    ).first()
     if env is None:
         raise HTTPException(status_code=404, detail="Environment not found")
 
     if body.name is not None and body.name != env.name:
-        if db.query(Environment).filter(Environment.name == body.name).first():
+        if db.query(Environment).filter(
+            Environment.user_id == user.id, Environment.name == body.name
+        ).first():
             raise HTTPException(status_code=400, detail=f"Environment '{body.name}' already exists")
         env.name = body.name
     if body.airflow_base_url is not None:
@@ -1332,12 +1367,13 @@ def update_environment(
         env.airflow_password = body.airflow_password.strip() or None
     if body.is_default is True and not env.is_default:
         for other in db.query(Environment).filter(
-            Environment.is_default.is_(True), Environment.id != env.id
+            Environment.user_id == user.id,
+            Environment.is_default.is_(True),
+            Environment.id != env.id,
         ).all():
             other.is_default = False
         env.is_default = True
     elif body.is_default is False and env.is_default:
-        # Refuse to demote without a replacement
         raise HTTPException(
             status_code=400,
             detail="Cannot unset is_default. Make another environment default first.",
@@ -1354,24 +1390,29 @@ def delete_environment(
     env_id: int,
     cascade: bool = False,
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
-    """Delete an environment.
+    """Delete an environment scoped to the current user.
 
     Refuses if any historical rows exist UNLESS `?cascade=true` is passed,
     in which case all env-scoped data is deleted alongside the env row.
-    Refuses to delete the default environment or the last remaining
-    environment regardless of cascade.
+    Refuses to delete the user's default env or their last remaining env
+    regardless of cascade.
     """
-    env = db.query(Environment).filter(Environment.id == env_id).first()
+    env = db.query(Environment).filter(
+        Environment.user_id == user.id, Environment.id == env_id
+    ).first()
     if env is None:
         raise HTTPException(status_code=404, detail="Environment not found")
     if env.is_default:
         raise HTTPException(status_code=400, detail="Cannot delete the default environment")
-    if db.query(Environment).count() <= 1:
-        raise HTTPException(status_code=400, detail="Cannot delete the last environment")
+    user_env_count = db.query(Environment).filter(Environment.user_id == user.id).count()
+    if user_env_count <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete your last environment")
 
-    has_runs = db.query(DAGRun).filter(DAGRun.environment_id == env.id).first()
+    has_runs = db.query(DAGRun).filter(
+        DAGRun.user_id == user.id, DAGRun.environment_id == env.id
+    ).first()
     if has_runs and not cascade:
         raise HTTPException(
             status_code=400,
@@ -1384,8 +1425,6 @@ def delete_environment(
 
     deleted_counts: dict[str, int] = {}
     if cascade:
-        # Order: child rows before parent. SQLAlchemy's bulk-delete bypasses
-        # ORM cascades but we have no FK CASCADE configured, so explicit is best.
         for model, name in [
             (TaskInstance, "task_instances"),
             (DAGRun, "dag_runs"),
@@ -1397,7 +1436,9 @@ def delete_environment(
             (ReportSchedule, "report_schedules"),
             (AIInsight, "ai_insights"),
         ]:
-            n = db.query(model).filter(model.environment_id == env.id).delete()
+            n = db.query(model).filter(
+                model.user_id == user.id, model.environment_id == env.id
+            ).delete()
             if n:
                 deleted_counts[name] = n
     db.delete(env)
@@ -1409,9 +1450,11 @@ def delete_environment(
 def test_environment(
     env_id: int,
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
-    env = db.query(Environment).filter(Environment.id == env_id).first()
+    env = db.query(Environment).filter(
+        Environment.user_id == user.id, Environment.id == env_id
+    ).first()
     if env is None:
         raise HTTPException(status_code=404, detail="Environment not found")
     return _airflow_probe(env)
@@ -1485,7 +1528,7 @@ def generate_report(
     format: str = "md",
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     if format not in REPORT_FORMATS:
         raise HTTPException(status_code=400, detail=f"format must be one of {sorted(REPORT_FORMATS)}")
@@ -1497,7 +1540,7 @@ def generate_report(
     md_body = body if format == "md" else reports_lib.render_markdown(data)
     summary = reports_lib.short_summary_line(data)
     row = ReportRun(
-        environment_id=env.id,
+        user_id=user.id, environment_id=env.id,
         range=range,
         format=format,
         source="manual",
@@ -1520,11 +1563,11 @@ def list_report_history(
     limit: int = 50,
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     rows = (
         db.query(ReportRun)
-        .filter(ReportRun.environment_id == env.id)
+        .filter(ReportRun.user_id == user.id, ReportRun.environment_id == env.id)
         .order_by(ReportRun.generated_at.desc())
         .limit(min(limit, 200))
         .all()
@@ -1551,11 +1594,12 @@ def download_stored_report(
     format: str = "md",
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     if format not in REPORT_FORMATS:
         raise HTTPException(status_code=400, detail=f"format must be one of {sorted(REPORT_FORMATS)}")
     row = db.query(ReportRun).filter(
+        ReportRun.user_id == user.id,
         ReportRun.environment_id == env.id,
         ReportRun.id == report_id,
     ).first()
@@ -1624,9 +1668,9 @@ def _serialize_schedule(s: Optional[ReportSchedule]) -> dict:
 def get_report_schedule(
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
-    s = db.query(ReportSchedule).filter(ReportSchedule.environment_id == env.id).first()
+    s = db.query(ReportSchedule).filter(ReportSchedule.user_id == user.id, ReportSchedule.environment_id == env.id).first()
     return _serialize_schedule(s)
 
 
@@ -1635,11 +1679,11 @@ def upsert_report_schedule(
     body: ReportScheduleUpdate,
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
-    s = db.query(ReportSchedule).filter(ReportSchedule.environment_id == env.id).first()
+    s = db.query(ReportSchedule).filter(ReportSchedule.user_id == user.id, ReportSchedule.environment_id == env.id).first()
     if s is None:
-        s = ReportSchedule(environment_id=env.id)
+        s = ReportSchedule(user_id=user.id, environment_id=env.id)
         db.add(s)
     s.enabled = body.enabled
     s.frequency = body.frequency
@@ -1718,12 +1762,12 @@ def _serialize_settings() -> dict:
 
 
 @app.get("/settings")
-def read_settings(_: str = Depends(require_auth)):
+def read_settings(user: User = Depends(require_auth)):
     return _serialize_settings()
 
 
 @app.put("/settings")
-def write_settings(body: dict, _: str = Depends(require_auth)):
+def write_settings(body: dict, user: User = Depends(require_auth)):
     """Bulk upsert. For secrets: omit the key to leave alone, send null to clear,
     send a string to set. For non-secrets: send the new value, or empty string / null to reset."""
     if not isinstance(body, dict):
@@ -1778,9 +1822,9 @@ def probe_webhook(
 def danger_reset_alert_configs(
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
-    deleted = db.query(DagAlertConfig).filter(DagAlertConfig.environment_id == env.id).delete()
+    deleted = db.query(DagAlertConfig).filter(DagAlertConfig.user_id == user.id, DagAlertConfig.environment_id == env.id).delete()
     db.commit()
     return {"deleted": deleted}
 
@@ -1789,9 +1833,9 @@ def danger_reset_alert_configs(
 def danger_clear_notifications(
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
-    deleted = db.query(Notification).filter(Notification.environment_id == env.id).delete()
+    deleted = db.query(Notification).filter(Notification.user_id == user.id, Notification.environment_id == env.id).delete()
     db.commit()
     return {"deleted": deleted}
 
@@ -1800,9 +1844,9 @@ def danger_clear_notifications(
 def danger_clear_reports(
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
-    deleted = db.query(ReportRun).filter(ReportRun.environment_id == env.id).delete()
+    deleted = db.query(ReportRun).filter(ReportRun.user_id == user.id, ReportRun.environment_id == env.id).delete()
     db.commit()
     return {"deleted": deleted}
 
@@ -1811,12 +1855,12 @@ def danger_clear_reports(
 def danger_full_resync(
     env: Environment = Depends(env_dep),
     db: Session = Depends(get_db),
-    _: str = Depends(require_auth),
+    user: User = Depends(require_auth),
 ):
     """Truncate dag_runs + task_instances FOR THIS ENV, then immediately re-pull from Airflow.
     Synchronous — typically completes in <30s for a small DAG set."""
-    runs_deleted = db.query(DAGRun).filter(DAGRun.environment_id == env.id).delete()
-    tasks_deleted = db.query(TaskInstance).filter(TaskInstance.environment_id == env.id).delete()
+    runs_deleted = db.query(DAGRun).filter(DAGRun.user_id == user.id, DAGRun.environment_id == env.id).delete()
+    tasks_deleted = db.query(TaskInstance).filter(TaskInstance.user_id == user.id, TaskInstance.environment_id == env.id).delete()
     db.commit()
     try:
         # _sync_airflow_data is the global sync. For per-env we use the inner helper.
@@ -1825,7 +1869,7 @@ def danger_full_resync(
         db.commit()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Re-sync failed after truncation: {e}")
-    runs_now = db.query(DAGRun).filter(DAGRun.environment_id == env.id).count()
+    runs_now = db.query(DAGRun).filter(DAGRun.user_id == user.id, DAGRun.environment_id == env.id).count()
     return {
         "runs_deleted": runs_deleted,
         "tasks_deleted": tasks_deleted,

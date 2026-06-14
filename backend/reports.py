@@ -58,6 +58,7 @@ def gather_report_data(db: Session, env, range_: str) -> dict:
 
     def window(start, end):
         return db.query(DAGRun).filter(
+            DAGRun.user_id == env.user_id,
             DAGRun.environment_id == env.id,
             DAGRun.start_date.isnot(None),
             DAGRun.start_date >= start,
@@ -152,7 +153,8 @@ def gather_report_data(db: Session, env, range_: str) -> dict:
         failed_task = (
             db.query(TaskInstance)
             .filter(
-                TaskInstance.environment_id == env.id,
+                TaskInstance.user_id == env.user_id,
+            TaskInstance.environment_id == env.id,
                 TaskInstance.dag_id == run.dag_id,
                 TaskInstance.run_id == run.run_id,
                 TaskInstance.state == "failed",
@@ -171,7 +173,8 @@ def gather_report_data(db: Session, env, range_: str) -> dict:
         annotation = (
             db.query(RunAnnotation)
             .filter(
-                RunAnnotation.environment_id == env.id,
+                RunAnnotation.user_id == env.user_id,
+            RunAnnotation.environment_id == env.id,
                 RunAnnotation.dag_id == run.dag_id,
                 RunAnnotation.run_id == run.run_id,
             )
@@ -192,6 +195,7 @@ def gather_report_data(db: Session, env, range_: str) -> dict:
     sla_configs = {
         c.dag_id: c
         for c in db.query(DagSlaConfig).filter(
+            DagSlaConfig.user_id == env.user_id,
             DagSlaConfig.environment_id == env.id,
             DagSlaConfig.enabled.is_(True),
         ).all()

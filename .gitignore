@@ -24,3 +24,6 @@ postgres_data/
 
 # OS
 .DS_Store
+
+# Local DB dumps from pg_dump (Session 2 backup, etc.)
+.backups/

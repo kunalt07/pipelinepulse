@@ -6,6 +6,9 @@ from database import Base
 from datetime import datetime
 
 
+# ---------- Identity ----------
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = {'extend_existing': True}
@@ -45,12 +48,27 @@ class ApiToken(Base):
     revoked_at = Column(DateTime, nullable=True)        # soft-delete sentinel
 
 
+# ---------- Per-user tenant data ----------
+#
+# Every table below has user_id, scoping the row to its owning tenant. The
+# user_id is redundant with environment_id (envs themselves are user-scoped),
+# but kept on every row for two reasons:
+#   1. Defense in depth — a missing env filter still won't leak across tenants.
+#   2. Cross-env queries (e.g. "all my report_runs across all my envs") become
+#      single-column lookups.
+
+
 class Environment(Base):
     __tablename__ = "environments"
-    __table_args__ = {'extend_existing': True}
+    __table_args__ = (
+        # Env names are unique per user (was previously globally unique).
+        UniqueConstraint("user_id", "name", name="uq_environments_user_name"),
+        {'extend_existing': True},
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False, index=True)
     airflow_base_url = Column(String, nullable=False)
     airflow_username = Column(String, nullable=True)
     airflow_password = Column(String, nullable=True)   # plaintext (self-hosted trade-off)
@@ -66,10 +84,12 @@ class DAGRun(Base):
     __table_args__ = (
         UniqueConstraint("environment_id", "run_id", name="uq_dag_runs_env_run"),
         Index("ix_dag_runs_env_dag", "environment_id", "dag_id"),
+        Index("ix_dag_runs_user_env", "user_id", "environment_id"),
         {'extend_existing': True},
     )
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     environment_id = Column(Integer, ForeignKey("environments.id"), nullable=False, index=True)
     dag_id = Column(String, index=True)
     run_id = Column(String, index=True)   # NOT unique alone — globally unique with environment_id
@@ -85,10 +105,12 @@ class TaskInstance(Base):
     __table_args__ = (
         Index("ix_task_instances_env_run", "environment_id", "run_id"),
         Index("ix_task_instances_env_dag", "environment_id", "dag_id"),
+        Index("ix_task_instances_user_env", "user_id", "environment_id"),
         {'extend_existing': True},
     )
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     environment_id = Column(Integer, ForeignKey("environments.id"), nullable=False, index=True)
     dag_id = Column(String, index=True)
     run_id = Column(String, index=True)
@@ -107,6 +129,7 @@ class AIInsight(Base):
     __table_args__ = {'extend_existing': True}
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     environment_id = Column(Integer, ForeignKey("environments.id"), nullable=False, index=True)
     dag_id = Column(String, index=True)
     run_id = Column(String, index=True)
@@ -120,6 +143,7 @@ class Notification(Base):
     __table_args__ = {'extend_existing': True}
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     environment_id = Column(Integer, ForeignKey("environments.id"), nullable=False, index=True)
     dag_id = Column(String, index=True)
     run_id = Column(String, index=True)
@@ -133,7 +157,8 @@ class DagAlertConfig(Base):
     __tablename__ = "dag_alert_configs"
     __table_args__ = {'extend_existing': True}
 
-    # Composite PK: alert config is per-(env, dag).
+    # Composite PK: alert config is per-(user, env, dag).
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
     environment_id = Column(Integer, ForeignKey("environments.id"), primary_key=True)
     dag_id = Column(String, primary_key=True)
     muted = Column(Boolean, default=False, nullable=False)
@@ -149,6 +174,7 @@ class ReportRun(Base):
     __table_args__ = {'extend_existing': True}
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     environment_id = Column(Integer, ForeignKey("environments.id"), nullable=False, index=True)
     range = Column(String)                       # "7d" | "30d"
     format = Column(String)                      # "md" | "html" | "pdf" — original requested format
@@ -164,6 +190,7 @@ class DagSlaConfig(Base):
     __tablename__ = "dag_sla_configs"
     __table_args__ = {'extend_existing': True}
 
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
     environment_id = Column(Integer, ForeignKey("environments.id"), primary_key=True)
     dag_id = Column(String, primary_key=True)
     enabled = Column(Boolean, default=True, nullable=False)
@@ -179,6 +206,7 @@ class RunAnnotation(Base):
     __tablename__ = "run_annotations"
     __table_args__ = {'extend_existing': True}
 
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
     environment_id = Column(Integer, ForeignKey("environments.id"), primary_key=True)
     dag_id = Column(String, primary_key=True)
     run_id = Column(String, primary_key=True)
@@ -198,11 +226,13 @@ class Setting(Base):
 class ReportSchedule(Base):
     __tablename__ = "report_schedules"
     __table_args__ = (
-        UniqueConstraint("environment_id", name="uq_report_schedules_env"),
+        # One schedule per (user, env). A user can have one schedule per env.
+        UniqueConstraint("user_id", "environment_id", name="uq_report_schedules_user_env"),
         {'extend_existing': True},
     )
 
-    id = Column(Integer, primary_key=True)       # one row per env (was: singleton id=1)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     environment_id = Column(Integer, ForeignKey("environments.id"), nullable=False, index=True)
     enabled = Column(Boolean, default=False, nullable=False)
     frequency = Column(String, default="weekly") # "weekly" | "monthly"

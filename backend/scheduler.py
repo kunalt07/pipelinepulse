@@ -5,7 +5,7 @@ from models import (
     DAGRun, TaskInstance, Notification, DagAlertConfig, ReportRun, ReportSchedule,
     DagSlaConfig, Environment,
 )
-from environment import list_environments
+from environment import list_all_environments
 from airflow_client import get_dags, get_dag_runs, get_task_instances, get_task_logs
 from notifier import send_failure_alert, send_report_notification, send_sla_alert, webhook_url
 import sla as sla_lib
@@ -51,11 +51,12 @@ def _in_quiet_hours(cfg: DagAlertConfig) -> bool:
     return now >= start or now < end
 
 
-def _consecutive_failure_count(db: Session, env_id: int, dag_id: str) -> int:
+def _consecutive_failure_count(db: Session, user_id: int, env_id: int, dag_id: str) -> int:
     """How many of the most recent runs failed in a row, ending with the most recent."""
     recent = (
         db.query(DAGRun)
         .filter(
+            DAGRun.user_id == user_id,
             DAGRun.environment_id == env_id,
             DAGRun.dag_id == dag_id,
             DAGRun.state.in_(("success", "failed")),
@@ -76,6 +77,7 @@ def _consecutive_failure_count(db: Session, env_id: int, dag_id: str) -> int:
 def _maybe_alert(db, env: Environment, dag_id: str, run_id: str):
     """Fire a webhook alert for a newly-failed run, exactly once per (env, run)."""
     already = db.query(Notification).filter(
+        Notification.user_id == env.user_id,
         Notification.environment_id == env.id,
         Notification.dag_id == dag_id,
         Notification.run_id == run_id,
@@ -86,6 +88,7 @@ def _maybe_alert(db, env: Environment, dag_id: str, run_id: str):
         return
 
     cfg = db.query(DagAlertConfig).filter(
+        DagAlertConfig.user_id == env.user_id,
         DagAlertConfig.environment_id == env.id,
         DagAlertConfig.dag_id == dag_id,
     ).first()
@@ -94,7 +97,7 @@ def _maybe_alert(db, env: Environment, dag_id: str, run_id: str):
         if cfg.muted:
             suppressed_reason = "muted"
         elif cfg.min_consecutive_failures and cfg.min_consecutive_failures > 1:
-            streak = _consecutive_failure_count(db, env.id, dag_id)
+            streak = _consecutive_failure_count(db, env.user_id, env.id, dag_id)
             if streak < cfg.min_consecutive_failures:
                 suppressed_reason = f"below_threshold({streak}/{cfg.min_consecutive_failures})"
         if suppressed_reason is None and _in_quiet_hours(cfg):
@@ -102,13 +105,14 @@ def _maybe_alert(db, env: Environment, dag_id: str, run_id: str):
 
     if suppressed_reason:
         db.add(Notification(
-            environment_id=env.id, dag_id=dag_id, run_id=run_id, event="run_failed",
+            user_id=env.user_id, environment_id=env.id, dag_id=dag_id, run_id=run_id, event="run_failed",
             delivered=f"suppressed:{suppressed_reason}", webhook_url=webhook_url() or "",
         ))
         logger.info(f"[{env.name}] Alert suppressed for {dag_id}/{run_id}: {suppressed_reason}")
         return
 
     failed_task = db.query(TaskInstance).filter(
+        TaskInstance.user_id == env.user_id,
         TaskInstance.environment_id == env.id,
         TaskInstance.dag_id == dag_id,
         TaskInstance.run_id == run_id,
@@ -119,7 +123,7 @@ def _maybe_alert(db, env: Environment, dag_id: str, run_id: str):
     url = webhook_url()
     delivered = send_failure_alert(env, dag_id, run_id, snippet)
     db.add(Notification(
-        environment_id=env.id, dag_id=dag_id, run_id=run_id, event="run_failed",
+        user_id=env.user_id, environment_id=env.id, dag_id=dag_id, run_id=run_id, event="run_failed",
         delivered=delivered, webhook_url=url or "",
     ))
     logger.info(f"[{env.name}] Webhook alert for {dag_id}/{run_id}: {delivered}")
@@ -178,13 +182,14 @@ def _sync_one_env(db, env: Environment, run_limit: int = SYNC_RUN_LIMIT):
             duration = (end - start).total_seconds() if start and end else None
             new_state = run.get("state")
             existing = db.query(DAGRun).filter(
-                DAGRun.environment_id == env.id,
+                DAGRun.user_id == env.user_id,
+        DAGRun.environment_id == env.id,
                 DAGRun.run_id == run_id,
             ).first()
             state_transitioned_to_failed = False
             if not existing:
                 db.add(DAGRun(
-                    environment_id=env.id,
+                    user_id=env.user_id, environment_id=env.id,
                     dag_id=dag_id,
                     run_id=run_id,
                     state=new_state,
@@ -225,13 +230,14 @@ def _sync_one_env(db, env: Environment, run_limit: int = SYNC_RUN_LIMIT):
                         logger.debug(f"Could not fetch logs for {task_id}: {e}")
 
                 existing_task = db.query(TaskInstance).filter(
-                    TaskInstance.environment_id == env.id,
+                    TaskInstance.user_id == env.user_id,
+        TaskInstance.environment_id == env.id,
                     TaskInstance.run_id == run_id,
                     TaskInstance.task_id == task_id,
                 ).first()
                 if not existing_task:
                     db.add(TaskInstance(
-                        environment_id=env.id,
+                        user_id=env.user_id, environment_id=env.id,
                         dag_id=dag_id,
                         run_id=run_id,
                         task_id=task_id,
@@ -258,7 +264,7 @@ def _sync_one_env(db, env: Environment, run_limit: int = SYNC_RUN_LIMIT):
 def sync_airflow_data(run_limit: int = SYNC_RUN_LIMIT):
     db = SessionLocal()
     try:
-        envs = list_environments(db, enabled_only=True)
+        envs = list_all_environments(db, enabled_only=True)
         if not envs:
             logger.info("No enabled environments to sync.")
             return
@@ -291,7 +297,8 @@ def resync_run(env: Environment, dag_id: str, run_id: str) -> dict:
         end = parse_dt(run.get("end_date"))
         duration = (end - start).total_seconds() if start and end else None
         existing = db.query(DAGRun).filter(
-            DAGRun.environment_id == env.id,
+            DAGRun.user_id == env.user_id,
+        DAGRun.environment_id == env.id,
             DAGRun.run_id == run_id,
         ).first()
         if existing:
@@ -317,7 +324,8 @@ def resync_run(env: Environment, dag_id: str, run_id: str) -> dict:
                     pass
 
             existing_task = db.query(TaskInstance).filter(
-                TaskInstance.environment_id == env.id,
+                TaskInstance.user_id == env.user_id,
+        TaskInstance.environment_id == env.id,
                 TaskInstance.run_id == run_id,
                 TaskInstance.task_id == task_id,
             ).first()
@@ -331,7 +339,7 @@ def resync_run(env: Environment, dag_id: str, run_id: str) -> dict:
                     existing_task.error_message = error_message
             else:
                 db.add(TaskInstance(
-                    environment_id=env.id,
+                    user_id=env.user_id, environment_id=env.id,
                     dag_id=dag_id, run_id=run_id, task_id=task_id, state=state,
                     start_date=t_start, end_date=t_end, duration_seconds=t_duration,
                     try_number=try_number, error_message=error_message,
@@ -349,7 +357,7 @@ def _check_sla_breaches():
     """Scan recent terminal runs across all envs for SLA breaches."""
     db = SessionLocal()
     try:
-        envs = list_environments(db, enabled_only=True)
+        envs = list_all_environments(db, enabled_only=True)
         if not envs:
             return
 
@@ -360,7 +368,8 @@ def _check_sla_breaches():
             configs = {
                 c.dag_id: c
                 for c in db.query(DagSlaConfig).filter(
-                    DagSlaConfig.environment_id == env.id,
+                    DagSlaConfig.user_id == env.user_id,
+        DagSlaConfig.environment_id == env.id,
                     DagSlaConfig.enabled.is_(True),
                 ).all()
             }
@@ -370,7 +379,8 @@ def _check_sla_breaches():
             runs = (
                 db.query(DAGRun)
                 .filter(
-                    DAGRun.environment_id == env.id,
+                    DAGRun.user_id == env.user_id,
+        DAGRun.environment_id == env.id,
                     DAGRun.dag_id.in_(list(configs.keys())),
                     DAGRun.start_date.isnot(None),
                     DAGRun.start_date >= cutoff,
@@ -390,7 +400,8 @@ def _check_sla_breaches():
                 event = f"sla_{breach.kind}"
 
                 already = db.query(Notification).filter(
-                    Notification.environment_id == env.id,
+                    Notification.user_id == env.user_id,
+        Notification.environment_id == env.id,
                     Notification.dag_id == run.dag_id,
                     Notification.run_id == run.run_id,
                     Notification.event == event,
@@ -400,7 +411,8 @@ def _check_sla_breaches():
                     continue
 
                 alert_cfg = db.query(DagAlertConfig).filter(
-                    DagAlertConfig.environment_id == env.id,
+                    DagAlertConfig.user_id == env.user_id,
+        DagAlertConfig.environment_id == env.id,
                     DagAlertConfig.dag_id == run.dag_id,
                 ).first()
                 suppressed_reason = None
@@ -412,7 +424,7 @@ def _check_sla_breaches():
 
                 if suppressed_reason:
                     db.add(Notification(
-                        environment_id=env.id,
+                        user_id=env.user_id, environment_id=env.id,
                         dag_id=run.dag_id, run_id=run.run_id, event=event,
                         delivered=f"suppressed:{suppressed_reason}", webhook_url=webhook_url() or "",
                     ))
@@ -420,7 +432,7 @@ def _check_sla_breaches():
 
                 delivered = send_sla_alert(env, run.dag_id, run.run_id, breach.kind, breach.message)
                 db.add(Notification(
-                    environment_id=env.id,
+                    user_id=env.user_id, environment_id=env.id,
                     dag_id=run.dag_id, run_id=run.run_id, event=event,
                     delivered=delivered, webhook_url=webhook_url() or "",
                 ))
@@ -458,7 +470,7 @@ def _maybe_generate_scheduled_report():
     """Runs every 15 min; for each env with an enabled schedule that's due, generate."""
     db = SessionLocal()
     try:
-        envs = list_environments(db, enabled_only=True)
+        envs = list_all_environments(db, enabled_only=True)
         if not envs:
             return
         now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -478,7 +490,10 @@ def _maybe_generate_scheduled_report():
                 logger.warning(f"Could not init Gemini for scheduled report: {e}")
 
         for env in envs:
-            s = db.query(ReportSchedule).filter(ReportSchedule.environment_id == env.id).first()
+            s = db.query(ReportSchedule).filter(
+                ReportSchedule.user_id == env.user_id,
+                ReportSchedule.environment_id == env.id,
+            ).first()
             if s is None or not _is_schedule_due(s, now):
                 continue
 
@@ -490,7 +505,7 @@ def _maybe_generate_scheduled_report():
             range_label = "weekly" if s.range == "7d" else "monthly"
 
             row = ReportRun(
-                environment_id=env.id,
+                user_id=env.user_id, environment_id=env.id,
                 range=s.range,
                 format=s.format,
                 source="scheduled",

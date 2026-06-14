@@ -15,32 +15,56 @@ export class UnauthorizedError extends Error {
 
 // ---------- Active environment ----------
 //
-// Multi-env: every API call may carry an `?env=<name>` query param. The active
-// env is set globally by the Dashboard (from URL ?env= or localStorage) and
-// threaded through `withEnv()` into every request. Initial value is null →
-// backend resolves to the default env.
+// Multi-tenant: the active env is per-user (one user might pick "production",
+// another "staging" — even on the same browser if they share a machine).
+// Storage key includes the user id so two accounts don't collide.
+//
+// The module loads before auth is known. setActiveEnvUser() is called by the
+// AuthProvider once /auth/me resolves, which migrates the in-memory and
+// localStorage state to the user-scoped key.
 
-const ACTIVE_ENV_STORAGE_KEY = "pipelinepulse:active-env";
+const LEGACY_ACTIVE_ENV_KEY = "pipelinepulse:active-env"; // pre-multi-tenant
+let activeEnvUserId: number | null = null;
 let activeEnv: string | null = null;
 
-if (typeof window !== "undefined") {
-  try {
-    activeEnv = window.localStorage.getItem(ACTIVE_ENV_STORAGE_KEY);
-  } catch {
-    activeEnv = null;
-  }
+function activeEnvKey(userId: number | null): string {
+  return userId ? `pipelinepulse:active-env:user_${userId}` : LEGACY_ACTIVE_ENV_KEY;
 }
 
 export function getActiveEnv(): string | null {
   return activeEnv;
 }
 
+export function setActiveEnvUser(userId: number | null) {
+  // Called by AuthProvider on /auth/me success. Reads the user-scoped storage
+  // key. If it's empty AND a legacy unscoped value exists, migrate it.
+  activeEnvUserId = userId;
+  if (typeof window !== "undefined") {
+    try {
+      const userKey = activeEnvKey(userId);
+      let value = window.localStorage.getItem(userKey);
+      if (!value && userId !== null) {
+        const legacy = window.localStorage.getItem(LEGACY_ACTIVE_ENV_KEY);
+        if (legacy) {
+          window.localStorage.setItem(userKey, legacy);
+          window.localStorage.removeItem(LEGACY_ACTIVE_ENV_KEY);
+          value = legacy;
+        }
+      }
+      activeEnv = value;
+    } catch {
+      activeEnv = null;
+    }
+  }
+}
+
 export function setActiveEnv(name: string | null) {
   activeEnv = name && name.trim() ? name : null;
   if (typeof window !== "undefined") {
     try {
-      if (activeEnv) window.localStorage.setItem(ACTIVE_ENV_STORAGE_KEY, activeEnv);
-      else window.localStorage.removeItem(ACTIVE_ENV_STORAGE_KEY);
+      const key = activeEnvKey(activeEnvUserId);
+      if (activeEnv) window.localStorage.setItem(key, activeEnv);
+      else window.localStorage.removeItem(key);
     } catch {
       // ignore quota / disabled-storage errors
     }
