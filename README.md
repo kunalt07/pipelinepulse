@@ -285,6 +285,10 @@ Three APScheduler jobs run continuously:
 
 The frontend never talks to Airflow directly; it reads from the backend. Auth is session-cookie-based for the web UI and `Authorization: Bearer` for scripts.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a human-readable summary of every release. `git log` has the full detail.
+
 ## Contributing
 
 Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). For larger changes, please open an issue first to discuss.
