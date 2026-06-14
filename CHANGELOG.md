@@ -53,7 +53,7 @@ are included for traceability.
   — proving the no-inherit rule works.
 - 6 rapid login attempts returns 429 on the 6th.
 
-Commit: forthcoming
+Commit: `c72d936`
 
 ---
 
