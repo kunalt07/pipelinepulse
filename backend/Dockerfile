@@ -17,8 +17,6 @@ COPY . .
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://localhost:${PORT:-8000}/health || exit 1
+    CMD curl -fsS http://localhost:8000/ || exit 1
 
-# `sh -c` so PORT can be overridden at runtime (Fly sets it, docker-compose
-# leaves it unset → default 8000).
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
